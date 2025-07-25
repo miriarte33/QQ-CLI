@@ -56,33 +56,19 @@ impl JiraIssueDisplay {
     }
 
     fn draw(&self, f: &mut Frame, issue: &JiraIssue) {
-        // Calculate the needed height for the header based on summary length
-        // Estimate wrapped lines: summary length / (terminal width - margins - label width)
-        let available_width = f.area().width.saturating_sub(20) as usize; // 20 for margins and "Summary: "
-        let summary_lines = (issue.fields.summary.len() / available_width.max(1)) + 1;
-        let header_height = 6 + summary_lines as u16; // 6 = borders(2) + ticket(1) + status(1) + summary label(1) + padding(1)
-        
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(header_height.min(20)), // Header info (exact height needed, max 20)
-                Constraint::Min(0),                        // Description (gets all remaining space)
-                Constraint::Length(2),                     // Help text at bottom
+                Constraint::Length(8),  // Header info
+                Constraint::Min(0),     // Description
+                Constraint::Length(2),  // Help text
             ])
             .split(f.area());
 
-        // Header block with ticket info
         self.render_header(f, chunks[0], issue);
-
-        // Description block
         self.render_description(f, chunks[1], &issue.fields.description);
-
-        // Help text
-        let help = Paragraph::new("Press 'q' or ESC to quit, ↑/↓ to scroll")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center);
-        f.render_widget(help, chunks[2]);
+        self.render_help(f, chunks[2]);
     }
 
     fn render_header(&self, f: &mut Frame, area: Rect, issue: &JiraIssue) {
@@ -94,39 +80,23 @@ impl JiraIssueDisplay {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // Create layout with separate lines for each field
-        let content_area = Layout::default()
-            .direction(Direction::Vertical)
-            .margin(0)
-            .constraints([
-                Constraint::Length(1),  // Ticket
-                Constraint::Length(1),  // Status
-                Constraint::Min(1),     // Summary (can wrap)
-            ])
-            .split(inner);
-
-        // Ticket line
-        let ticket_line = vec![
-            Span::styled("Ticket: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(&issue.key),
+        let header_text = vec![
+            Line::from(vec![
+                Span::styled("Ticket: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(&issue.key),
+            ]),
+            Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(&issue.fields.status.name),
+            ]),
+            Line::from(vec![
+                Span::styled("Summary: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(&issue.fields.summary),
+            ]),
         ];
-        f.render_widget(Paragraph::new(Line::from(ticket_line)), content_area[0]);
 
-        // Status line
-        let status_line = vec![
-            Span::styled("Status: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(&issue.fields.status.name),
-        ];
-        f.render_widget(Paragraph::new(Line::from(status_line)), content_area[1]);
-
-        // Summary with wrapping
-        let summary = vec![
-            Span::styled("Summary: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(&issue.fields.summary),
-        ];
-        let summary_paragraph = Paragraph::new(Line::from(summary))
-            .wrap(Wrap { trim: true });
-        f.render_widget(summary_paragraph, content_area[2]);
+        let paragraph = Paragraph::new(header_text).wrap(Wrap { trim: true });
+        f.render_widget(paragraph, inner);
     }
 
     fn render_description(&self, f: &mut Frame, area: Rect, description: &Option<Value>) {
@@ -139,7 +109,7 @@ impl JiraIssueDisplay {
         f.render_widget(block, area);
 
         if let Some(desc) = description {
-            self.render_description_content(f, inner, desc);
+            self.render_jira_description(f, inner, desc);
         } else {
             let text = Paragraph::new("(No description provided)")
                 .style(Style::default().fg(Color::DarkGray));
@@ -147,8 +117,14 @@ impl JiraIssueDisplay {
         }
     }
 
-    fn render_description_content(&self, f: &mut Frame, area: Rect, value: &Value) {
-        let mut current_y = 0;
+    fn render_help(&self, f: &mut Frame, area: Rect) {
+        let help = Paragraph::new("Press 'q' or ESC to quit, ↑/↓ to scroll")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(help, area);
+    }
+
+    fn render_jira_description(&self, f: &mut Frame, area: Rect, value: &Value) {
         let mut remaining_area = area;
 
         if let Some(content) = value.get("content").and_then(|c| c.as_array()) {
@@ -161,54 +137,41 @@ impl JiraIssueDisplay {
                 
                 match block_type {
                     "paragraph" => {
-                        if let Some(text) = Self::extract_text_content(item) {
+                        if let Some(text) = self.extract_text(item) {
                             let paragraph = Paragraph::new(text)
                                 .wrap(Wrap { trim: true });
-                            let height = 3.min(remaining_area.height); // Estimate height
+                            let height = 2.min(remaining_area.height);
                             f.render_widget(paragraph, Rect { height, ..remaining_area });
                             
-                            current_y += height + 1;
-                            if current_y < area.height {
-                                remaining_area.y += height + 1;
-                                remaining_area.height = remaining_area.height.saturating_sub(height + 1);
-                            }
+                            remaining_area.y += height;
+                            remaining_area.height = remaining_area.height.saturating_sub(height);
                         }
                     }
                     "heading" => {
-                        if let Some(text) = Self::extract_text_content(item) {
+                        if let Some(text) = self.extract_text(item) {
                             let level = item.get("attrs")
                                 .and_then(|a| a.get("level"))
                                 .and_then(|l| l.as_u64())
                                 .unwrap_or(1);
                             
-                            let style = Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD);
-                            
-                            let heading = Paragraph::new(format!("{} {}", "#".repeat(level as usize), text))
-                                .style(style);
+                            let heading = format!("{} {}", "#".repeat(level as usize), text);
+                            let paragraph = Paragraph::new(heading)
+                                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
                             
                             let height = 2.min(remaining_area.height);
-                            f.render_widget(heading, Rect { height, ..remaining_area });
+                            f.render_widget(paragraph, Rect { height, ..remaining_area });
                             
-                            current_y += height;
-                            if current_y < area.height {
-                                remaining_area.y += height;
-                                remaining_area.height = remaining_area.height.saturating_sub(height);
-                            }
+                            remaining_area.y += height;
+                            remaining_area.height = remaining_area.height.saturating_sub(height);
                         }
                     }
                     "table" => {
-                        // Pass the available width to create_table_widget
-                        if let Some((table_widget, height)) = Self::create_table_widget(item, remaining_area.width) {
+                        if let Some((table_widget, height)) = self.create_table_widget(item, remaining_area.width) {
                             let table_height = height.min(remaining_area.height);
                             f.render_widget(table_widget, Rect { height: table_height, ..remaining_area });
                             
-                            current_y += table_height + 1;
-                            if current_y < area.height {
-                                remaining_area.y += table_height + 1;
-                                remaining_area.height = remaining_area.height.saturating_sub(table_height + 1);
-                            }
+                            remaining_area.y += table_height + 1;
+                            remaining_area.height = remaining_area.height.saturating_sub(table_height + 1);
                         }
                     }
                     _ => {}
@@ -222,196 +185,90 @@ impl JiraIssueDisplay {
         }
     }
 
-
-    fn create_table_widget(item: &Value, available_width: u16) -> Option<(Table, u16)> {
+    fn create_table_widget(&self, item: &Value, available_width: u16) -> Option<(Table, u16)> {
         if let Some(rows) = item.get("content").and_then(|c| c.as_array()) {
-            let mut all_cells: Vec<Vec<String>> = Vec::new();
-            let mut is_header_row = true;
+            let mut table_rows = Vec::new();
+            let mut header_row = None;
+            let mut max_cols = 0;
             
-            // First pass: collect all cell content
+            // First pass: collect all rows and determine column count
+            let mut all_cells: Vec<Vec<String>> = Vec::new();
             for row in rows {
                 if row.get("type").and_then(|t| t.as_str()) == Some("tableRow") {
                     if let Some(cells) = row.get("content").and_then(|c| c.as_array()) {
-                        let mut row_content = Vec::new();
-                        for cell in cells {
-                            let cell_text = Self::extract_cell_text(cell).unwrap_or_default();
-                            row_content.push(cell_text);
-                        }
+                        let row_content: Vec<String> = cells.iter()
+                            .map(|cell| self.extract_cell_text(cell).unwrap_or_default())
+                            .collect();
+                        max_cols = max_cols.max(row_content.len());
                         all_cells.push(row_content);
                     }
                 }
             }
 
-            if all_cells.is_empty() {
+            if all_cells.is_empty() || max_cols == 0 {
                 return None;
             }
 
-            let num_cols = all_cells[0].len();
-            if num_cols == 0 {
-                return None;
-            }
+            // Create constraints for equal-width columns
+            let constraints: Vec<Constraint> = (0..max_cols)
+                .map(|_| Constraint::Percentage(100 / max_cols as u16))
+                .collect();
 
-            // Calculate column widths based on available terminal width
+            // Calculate actual column width based on available width
             // Account for borders: 1 char per column separator + 2 for outer borders
-            // Also account for padding: 1 space on each side of content per column
-            let separators = if num_cols > 0 { num_cols - 1 } else { 0 };
-            let border_width = (separators + 2) as u16; // separators + left/right borders
-            let padding_width = (num_cols * 2) as u16; // 2 spaces padding per column
-            let total_overhead = border_width + padding_width;
-            let usable_width = available_width.saturating_sub(total_overhead) as usize;
-            let min_col_width = 5;
+            // Account for padding: 1 space on each side per column
+            let borders_width = (max_cols - 1) + 2; // column separators + outer borders
+            let padding_width = max_cols * 2; // 2 spaces per column
+            let content_width = available_width.saturating_sub((borders_width + padding_width) as u16);
+            let approx_col_width = (content_width / max_cols as u16).max(10) as usize;
             
-            // Calculate the actual content length and ideal width for each column
-            let mut content_lengths: Vec<usize> = vec![0; num_cols];
-            let mut ideal_widths: Vec<usize> = vec![0; num_cols];
-            let mut min_widths: Vec<usize> = vec![min_col_width; num_cols];
-            
-            for row in &all_cells {
-                for (i, cell) in row.iter().enumerate() {
-                    if i < content_lengths.len() {
-                        // Track the maximum content length for this column
-                        content_lengths[i] = content_lengths[i].max(cell.len());
-                        
-                        // Calculate minimum width needed (based on longest word)
-                        let longest_word = cell.split_whitespace()
-                            .map(|w| w.len())
-                            .max()
-                            .unwrap_or(0);
-                        min_widths[i] = min_widths[i].max(longest_word);
-                        
-                        // Ideal width for readability (capped at reasonable length)
-                        ideal_widths[i] = ideal_widths[i].max(cell.len().min(50));
-                    }
-                }
-            }
-
-            // Calculate total ideal width
-            let total_ideal_width: usize = ideal_widths.iter().sum();
-            
-            let col_widths: Vec<usize> = if total_ideal_width <= usable_width {
-                // If ideal widths fit, use them
-                ideal_widths.iter()
-                    .map(|&w| w.max(min_col_width))
-                    .collect()
-            } else {
-                // Need to distribute space - prioritize columns with more content
-                let total_min_width: usize = min_widths.iter().sum();
-                
-                if total_min_width > usable_width {
-                    // Even minimum widths don't fit - scale down proportionally
-                    let scale_factor = usable_width as f64 / total_min_width as f64;
-                    min_widths.iter()
-                        .map(|&w| ((w as f64 * scale_factor) as usize).max(min_col_width))
-                        .collect()
-                } else {
-                    // We have extra space to distribute after meeting minimums
-                    let extra_space = usable_width - total_min_width;
-                    
-                    // Calculate weights based on content length
-                    let total_content_length: usize = content_lengths.iter().sum::<usize>().max(1);
-                    
-                    min_widths.iter().enumerate()
-                        .map(|(i, &min_w)| {
-                            // Give extra space proportional to content length
-                            let content_ratio = content_lengths[i] as f64 / total_content_length as f64;
-                            let extra_for_column = (extra_space as f64 * content_ratio) as usize;
-                            min_w + extra_for_column
-                        })
-                        .collect()
-                }
-            };
-
-            // Create table rows with wrapped text
-            let mut table_rows = Vec::new();
-            let mut header_row = None;
             let mut total_height = 0u16;
-
-            for (row_idx, row_content) in all_cells.iter().enumerate() {
-                // Wrap text in each cell
+            
+            // Create table rows with text wrapping
+            for (idx, row_content) in all_cells.iter().enumerate() {
+                let mut max_lines_in_row = 1;
                 let mut wrapped_cells: Vec<Vec<String>> = Vec::new();
-                let mut max_lines = 1;
-
-                for (col_idx, cell_text) in row_content.iter().enumerate() {
-                    let width = col_widths.get(col_idx).copied().unwrap_or(min_col_width);
-                    let wrapped = textwrap::wrap(cell_text, width);
+                
+                // Wrap text in each cell
+                for cell_text in row_content {
+                    let wrapped = textwrap::wrap(cell_text, approx_col_width);
                     let wrapped_lines: Vec<String> = wrapped.iter().map(|cow| cow.to_string()).collect();
-                    max_lines = max_lines.max(wrapped_lines.len());
+                    max_lines_in_row = max_lines_in_row.max(wrapped_lines.len());
                     wrapped_cells.push(wrapped_lines);
                 }
-
+                
                 // Pad cells to have the same number of lines
                 for cell_lines in &mut wrapped_cells {
-                    while cell_lines.len() < max_lines {
+                    while cell_lines.len() < max_lines_in_row {
                         cell_lines.push(String::new());
                     }
                 }
+                
+                // Create cells with multi-line content
+                let cells: Vec<Cell> = wrapped_cells.into_iter()
+                    .map(|lines| {
+                        let text = lines.join("\n");
+                        if idx == 0 {
+                            Cell::from(text).style(
+                                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                            )
+                        } else {
+                            Cell::from(text)
+                        }
+                    })
+                    .collect();
 
-                // Create table row with proper height
-                let mut row_cells = Vec::new();
-                for (_col_idx, cell_lines) in wrapped_cells.iter().enumerate() {
-                    let cell_text = cell_lines.join("\n");
-                    let cell = if row_idx == 0 && is_header_row {
-                        Cell::from(cell_text)
-                            .style(Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD))
-                    } else {
-                        Cell::from(cell_text)
-                    };
-                    row_cells.push(cell);
-                }
-
-                let row = Row::new(row_cells).height(max_lines as u16);
-                total_height += max_lines as u16;
-
-                if row_idx == 0 && is_header_row {
+                let row = Row::new(cells).height(max_lines_in_row as u16);
+                total_height += max_lines_in_row as u16;
+                
+                if idx == 0 {
                     header_row = Some(row);
-                    is_header_row = false;
                 } else {
                     table_rows.push(row);
                 }
             }
 
-            // Ensure we're using all available width
-            let total_calculated_width: usize = col_widths.iter().sum();
-            
-            // If we have extra space, distribute it to columns proportionally to their content
-            let final_widths = if total_calculated_width < usable_width {
-                let extra_space = usable_width - total_calculated_width;
-                let mut adjusted_widths = col_widths.clone();
-                
-                // Distribute extra space proportionally to content length
-                let total_content_length: usize = content_lengths.iter().sum::<usize>().max(1);
-                let mut distributed = 0;
-                
-                for (i, width) in adjusted_widths.iter_mut().enumerate() {
-                    if i < content_lengths.len() {
-                        let content_ratio = content_lengths[i] as f64 / total_content_length as f64;
-                        let extra_for_column = (extra_space as f64 * content_ratio) as usize;
-                        *width += extra_for_column;
-                        distributed += extra_for_column;
-                    }
-                }
-                
-                // Add any remaining space due to rounding to the longest column
-                if distributed < extra_space {
-                    if let Some((max_col_idx, _)) = content_lengths.iter().enumerate().max_by_key(|&(_, len)| *len) {
-                        adjusted_widths[max_col_idx] += extra_space - distributed;
-                    }
-                }
-                
-                adjusted_widths
-            } else {
-                col_widths
-            };
-            
-            // Create constraints based on final column widths
-            let constraints: Vec<Constraint> = final_widths.iter()
-                .map(|&w| Constraint::Length(w as u16))
-                .collect();
-
-            let mut table = Table::new(table_rows, &constraints)
-                .style(Style::default())
+            let mut table = Table::new(table_rows, constraints)
                 .block(Block::default().borders(Borders::ALL));
 
             if let Some(header) = header_row {
@@ -419,22 +276,19 @@ impl JiraIssueDisplay {
             }
 
             // Total height includes borders and spacing
-            let height = total_height + 4; // +4 for borders and spacing
+            let height = (total_height + 4).min(20);
             Some((table, height))
         } else {
             None
         }
     }
 
-    fn extract_text_content(item: &Value) -> Option<String> {
+    fn extract_text(&self, item: &Value) -> Option<String> {
         if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
-            let mut texts = Vec::new();
-            
-            for content_item in content {
-                if let Some(text) = content_item.get("text").and_then(|t| t.as_str()) {
-                    texts.push(text.to_string());
-                }
-            }
+            let texts: Vec<String> = content.iter()
+                .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+                .map(|s| s.to_string())
+                .collect();
             
             if !texts.is_empty() {
                 Some(texts.join(""))
@@ -446,15 +300,11 @@ impl JiraIssueDisplay {
         }
     }
 
-    fn extract_cell_text(cell: &Value) -> Option<String> {
+    fn extract_cell_text(&self, cell: &Value) -> Option<String> {
         if let Some(content) = cell.get("content").and_then(|c| c.as_array()) {
-            let mut texts = Vec::new();
-            
-            for item in content {
-                if let Some(text) = Self::extract_text_content(item) {
-                    texts.push(text);
-                }
-            }
+            let texts: Vec<String> = content.iter()
+                .filter_map(|item| self.extract_text(item))
+                .collect();
             
             if !texts.is_empty() {
                 Some(texts.join(" "))
