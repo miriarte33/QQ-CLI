@@ -112,3 +112,43 @@ When adding new features:
 4. Update README with usage examples
 5. Use existing error handling patterns
 6. Follow JIRA module as reference implementation
+
+## UI Development Guidelines (ratatui)
+
+### Key Principles
+- **Simplicity over complexity**: Avoid over-engineering UI components. The original table rendering was 468 lines; the refactored version is ~300 lines with better maintainability
+- **Use framework features properly**: Always prefer ratatui's built-in widgets (Table, Cell, etc.) over manual rendering
+- **Window-aware rendering**: Use the actual terminal dimensions from the Frame, not hardcoded values
+
+### Table Rendering Best Practices
+1. **Use Table widget for tabular data**: Don't try to manually render tables with text
+2. **Dynamic width calculation**: Calculate column widths based on `available_width` from the rendering area
+3. **Account for margins properly**:
+   - Column separators: 1 char between columns
+   - Outer borders: 2 chars total
+   - Cell padding: 2 spaces per column
+4. **Text wrapping**: Use textwrap crate with calculated column widths: `(available_width - margins) / num_columns`
+5. **Equal-width columns**: Use `Constraint::Percentage(100 / num_cols)` for simple equal distribution
+
+### Example Pattern for Mixed Content Rendering
+```rust
+// Render different content types in a scrollable area
+fn render_jira_description(&self, f: &mut Frame, area: Rect, value: &Value) {
+    let mut remaining_area = area;
+    
+    for item in content {
+        match block_type {
+            "paragraph" => { /* render with Paragraph widget */ }
+            "heading" => { /* render with styled Paragraph */ }
+            "table" => { /* render with Table widget */ }
+        }
+        // Update remaining_area after each element
+    }
+}
+```
+
+### Refactoring Lessons
+- **Balance abstraction levels**: Use high-level widgets while keeping implementation straightforward
+- **Iterative refinement**: Start simple, then add complexity only where needed
+- **Don't reinvent the wheel**: ratatui and textwrap already solve text layout problems well
+- **Responsive design**: Tables and text should adapt to terminal width automatically
