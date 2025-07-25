@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 mod config;
 mod jira;
+mod ui;
 
 use config::Config;
 
@@ -91,8 +92,8 @@ fn handle_config_command(command: ConfigCommands) -> Result<()> {
 fn handle_jira_command(command: JiraCommands) -> Result<()> {
     use git2::Repository;
     use regex::Regex;
-    use serde_json::Value;
     use jira::JiraClient;
+    use ui::JiraIssueDisplay;
     
     // Helper functions for JIRA commands
     fn get_current_branch() -> Result<String> {
@@ -123,24 +124,6 @@ fn handle_jira_command(command: JiraCommands) -> Result<()> {
         anyhow::bail!("No JIRA ticket ID found in branch name: {}", branch_name)
     }
     
-    fn extract_text_from_doc(value: &Value) -> String {
-        let mut text_parts = Vec::new();
-        
-        if let Some(content) = value.get("content").and_then(|c| c.as_array()) {
-            for item in content {
-                if let Some(item_content) = item.get("content").and_then(|c| c.as_array()) {
-                    for text_item in item_content {
-                        if let Some(text) = text_item.get("text").and_then(|t| t.as_str()) {
-                            text_parts.push(text.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        
-        text_parts.join(" ")
-    }
-    
     let config = Config::load()?;
     let client = JiraClient::new(config);
     
@@ -152,19 +135,8 @@ fn handle_jira_command(command: JiraCommands) -> Result<()> {
             println!("Fetching details for ticket: {}", ticket_id);
             let issue = client.get_issue(&ticket_id)?;
             
-            println!("\nTicket: {}", issue.key);
-            println!("Summary: {}", issue.fields.summary);
-            println!("Status: {}", issue.fields.status.name);
-            if let Some(description) = &issue.fields.description {
-                let desc_text = if let Some(_obj) = description.as_object() {
-                    extract_text_from_doc(description)
-                } else {
-                    description.as_str().unwrap_or("").to_string()
-                };
-                if !desc_text.is_empty() {
-                    println!("\nDescription:\n{}", desc_text);
-                }
-            }
+            // Use the new Ratatui UI to display the issue
+            JiraIssueDisplay::show(&issue)?;
         }
         
         JiraCommands::Comment { message } => {

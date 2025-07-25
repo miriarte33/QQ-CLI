@@ -15,7 +15,8 @@ qq/
 ├── src/
 │   ├── main.rs         # CLI entry point and command handling
 │   ├── config.rs       # Configuration management
-│   └── jira.rs         # JIRA API client implementation
+│   ├── jira.rs         # JIRA API client implementation
+│   └── ui.rs           # Terminal UI components using ratatui
 └── target/             # Build artifacts (gitignored)
 ```
 
@@ -31,6 +32,8 @@ qq/
 - **dirs** (5.0): Platform-specific directory paths
 - **toml** (0.8): Configuration file format
 - **anyhow** (1.0): Error handling with context
+- **ratatui** (0.29): Terminal UI framework for rich display
+- **crossterm** (0.28): Cross-platform terminal manipulation
 
 ## Code Patterns and Conventions
 
@@ -76,6 +79,14 @@ qq/
 - Explicit imports at function level for clarity
 - Early returns with `?` operator
 - Match expressions for command handling
+
+### UI Design (ratatui)
+- Full-screen terminal UI for JIRA ticket display
+- Scrollable content with keyboard navigation (↑/↓ keys)
+- Proper table widgets for structured data
+- Text wrapping for long content
+- Color-coded elements (headers, status, etc.)
+- Press 'q' or ESC to exit
 
 ## Testing and Building
 
