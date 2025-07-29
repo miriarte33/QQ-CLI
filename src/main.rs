@@ -44,6 +44,12 @@ enum JiraCommands {
     
     #[command(about = "Close the ticket from current git branch")]
     Close,
+    
+    #[command(about = "Assign the ticket from current git branch to yourself")]
+    Assign,
+    
+    #[command(about = "Assign the ticket to yourself and move to In Progress")]
+    Pickup,
 }
 
 #[derive(Subcommand)]
@@ -155,6 +161,24 @@ fn handle_jira_command(command: JiraCommands) -> Result<()> {
             println!("Closing ticket: {}", ticket_id);
             client.close_issue(&ticket_id)?;
             println!("Ticket closed successfully!");
+        }
+        
+        JiraCommands::Assign => {
+            let branch = get_current_branch()?;
+            let ticket_id = extract_ticket_id(&branch)?;
+            
+            println!("Assigning ticket {} to yourself", ticket_id);
+            client.assign_issue(&ticket_id)?;
+            println!("Ticket assigned successfully!");
+        }
+        
+        JiraCommands::Pickup => {
+            let branch = get_current_branch()?;
+            let ticket_id = extract_ticket_id(&branch)?;
+            
+            println!("Picking up ticket: {}", ticket_id);
+            client.pickup_issue(&ticket_id)?;
+            println!("Ticket assigned to you and moved to In Progress!");
         }
     }
     

@@ -60,7 +60,7 @@ impl JiraIssueDisplay {
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(8),  // Header info
+                Constraint::Length(9),  // Header info (increased for assignee)
                 Constraint::Min(0),     // Description
                 Constraint::Length(2),  // Help text
             ])
@@ -80,6 +80,11 @@ impl JiraIssueDisplay {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
+        let assignee_text = match &issue.fields.assignee {
+            Some(user) => user.display_name.clone(),
+            None => "Unassigned".to_string(),
+        };
+
         let header_text = vec![
             Line::from(vec![
                 Span::styled("Ticket: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -88,6 +93,10 @@ impl JiraIssueDisplay {
             Line::from(vec![
                 Span::styled("Status: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw(&issue.fields.status.name),
+            ]),
+            Line::from(vec![
+                Span::styled("Assignee: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(&assignee_text),
             ]),
             Line::from(vec![
                 Span::styled("Summary: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
