@@ -50,6 +50,12 @@ enum JiraCommands {
     
     #[command(about = "Assign the ticket to yourself and move to In Progress")]
     Pickup,
+    
+    #[command(about = "Create a feature branch for a JIRA ticket, assign it to yourself, and move to In Progress")]
+    Start {
+        #[arg(help = "JIRA ticket number (e.g., PROJ-123)")]
+        ticket: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -178,6 +184,40 @@ fn handle_jira_command(command: JiraCommands) -> Result<()> {
             
             println!("Picking up ticket: {}", ticket_id);
             client.pickup_issue(&ticket_id)?;
+            println!("Ticket assigned to you and moved to In Progress!");
+        }
+        
+        JiraCommands::Start { ticket } => {
+            // Create the feature branch
+            let branch_name = format!("feature/{}", ticket);
+            
+            // Open the git repository
+            let repo = Repository::open(".").context("Failed to open git repository")?;
+            
+            // Get the current HEAD commit
+            let head = repo.head().context("Failed to get HEAD reference")?;
+            let target = head.target().context("Failed to get HEAD target")?;
+            let commit = repo.find_commit(target).context("Failed to find HEAD commit")?;
+            
+            // Create the new branch
+            repo.branch(&branch_name, &commit, false)
+                .context(format!("Failed to create branch '{}'", branch_name))?;
+            
+            // Checkout the new branch
+            let obj = repo.revparse_single(&format!("refs/heads/{}", branch_name))
+                .context("Failed to find new branch")?;
+            
+            repo.checkout_tree(&obj, None)
+                .context("Failed to checkout new branch")?;
+            
+            repo.set_head(&format!("refs/heads/{}", branch_name))
+                .context("Failed to set HEAD to new branch")?;
+            
+            println!("Created and switched to branch: {}", branch_name);
+            
+            // Now assign the ticket to yourself and move it to In Progress
+            println!("Picking up ticket: {}", ticket);
+            client.pickup_issue(&ticket)?;
             println!("Ticket assigned to you and moved to In Progress!");
         }
     }

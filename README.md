@@ -50,6 +50,23 @@ qq jira comment "Updated the implementation as discussed"
 qq jira close
 ```
 
+##### Assign ticket to yourself
+```bash
+qq jira assign
+```
+
+##### Pick up a ticket (assign to yourself and move to In Progress)
+```bash
+qq jira pickup
+```
+
+##### Start working on a new ticket
+Creates a new feature branch, assigns the ticket to yourself, and moves it to In Progress:
+```bash
+qq jira start PROJ-123
+```
+This will create and switch to a branch named `feature/PROJ-123`.
+
 ## Examples
 
 ```bash
