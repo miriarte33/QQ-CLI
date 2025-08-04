@@ -65,7 +65,7 @@ enum JiraCommands {
     
     #[command(about = "List all tickets in an epic with interactive controls")]
     Epic {
-        #[arg(help = "Epic ticket number (e.g., EPIC-123)")]
+        #[arg(help = "Epic ticket number (e.g., EPIC-123) or 'list' to show all epics")]
         ticket: String,
     },
     
@@ -241,16 +241,32 @@ fn handle_jira_command(command: JiraCommands) -> Result<()> {
         }
         
         JiraCommands::Epic { ticket } => {
-            use ui::EpicListDisplay;
+            use ui::{EpicListDisplay, AllEpicsDisplay};
             
-            println!("Fetching epic details for: {}", ticket);
-            let epic = client.get_issue(&ticket)?;
-            
-            println!("Fetching child issues...");
-            let children = client.get_epic_children(&ticket)?;
-            
-            // Display the epic and its children in interactive UI
-            EpicListDisplay::show(&epic, children, &client)?;
+            if ticket == "list" {
+                // Show all epics
+                println!("Fetching all epics...");
+                
+                let epics = client.get_all_epics()?;
+                
+                if epics.is_empty() {
+                    println!("No epics found.");
+                } else {
+                    println!("Found {} epic(s).", epics.len());
+                    // Display all epics in interactive UI
+                    AllEpicsDisplay::show(epics, &client)?;
+                }
+            } else {
+                // Show specific epic
+                println!("Fetching epic details for: {}", ticket);
+                let epic = client.get_issue(&ticket)?;
+                
+                println!("Fetching child issues...");
+                let children = client.get_epic_children(&ticket)?;
+                
+                // Display the epic and its children in interactive UI
+                EpicListDisplay::show(&epic, children, &client)?;
+            }
         }
         
         JiraCommands::Mine => {

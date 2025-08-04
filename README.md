@@ -42,9 +42,14 @@ qq jira get parent  # Shows the parent epic with all its children
 ```
 
 ##### View and manage epics
-Interactive view for managing all tickets in an epic:
+List all epics:
 ```bash
-qq jira epic EPIC-123
+qq jira epic list    # Shows all epics in an interactive view
+```
+
+View specific epic with its child tickets:
+```bash
+qq jira epic EPIC-123    # Shows the epic and all its child issues
 ```
 
 ##### View your assigned tickets
@@ -125,6 +130,25 @@ Ticket closed successfully!
 ```
 
 ### Interactive Epic Management
+
+#### List All Epics
+```bash
+$ qq jira epic list
+
+# Shows all epics in an interactive view
+# Press 'v' to view any epic with its child issues
+
+All Epics:
+┌─────────────┬────────────────┬─────────────────────────────────────────────────┐
+│ Key         │ Status         │ Summary                                         │
+├─────────────┼────────────────┼─────────────────────────────────────────────────┤
+│ EPIC-100 ▶  │ In Progress    │ Q4 Authentication Features                      │
+│ EPIC-101    │ To Do          │ Q1 Performance Improvements                     │
+│ EPIC-102    │ Done           │ Q3 API Redesign                                 │
+└─────────────┴────────────────┴─────────────────────────────────────────────────┘
+```
+
+#### View Specific Epic
 ```bash
 $ qq jira epic EPIC-100
 

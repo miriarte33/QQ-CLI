@@ -503,4 +503,73 @@ impl JiraClient {
         
         Ok(user)
     }
+    
+    pub fn get_all_epics(&self) -> Result<Vec<JiraIssue>> {
+        // Try different epic type names
+        let epic_types = vec!["Epic", "epic", "Epic Story", "Epic Feature"];
+        let mut all_epics = Vec::new();
+        let mut last_error = None;
+        
+        for epic_type in epic_types {
+            let jql = format!("issuetype = \"{}\" AND status != Done ORDER BY updated DESC", epic_type);
+            
+            let url = format!("{}/rest/api/3/search", self.base_url);
+            
+            let response = self.client
+                .get(&url)
+                .header(AUTHORIZATION, &self.auth_header)
+                .header(ACCEPT, "application/json")
+                .query(&[
+                    ("jql", &jql),
+                    ("fields", &"key,summary,status,assignee,updated".to_string()),
+                    ("maxResults", &"100".to_string())
+                ])
+                .send()
+                .context("Failed to send search request to JIRA")?;
+            
+            let status = response.status();
+            let response_text = response.text()?;
+            
+            if status.is_success() {
+                #[derive(Debug, Deserialize)]
+                struct SearchResponse {
+                    issues: Vec<JiraIssue>,
+                }
+                
+                if let Ok(search_response) = serde_json::from_str::<SearchResponse>(&response_text) {
+                    all_epics.extend(search_response.issues);
+                }
+            } else {
+                // Check if it's a permission error
+                if response_text.contains("does not exist or you do not have permission") {
+                    last_error = Some(format!("Permission denied or '{}' issue type doesn't exist", epic_type));
+                } else if response_text.contains("does not exist for the field 'issuetype'") {
+                    // This epic type doesn't exist, try the next one
+                    continue;
+                } else {
+                    eprintln!("JIRA API error for epic type '{}': {}", epic_type, response_text);
+                    last_error = Some(format!("Failed to get epics: {}", status));
+                }
+            }
+        }
+        
+        if all_epics.is_empty() {
+            if let Some(error) = last_error {
+                anyhow::bail!("Could not find any active epics. {}", error);
+            } else {
+                anyhow::bail!("No active epics found. Your JIRA instance might use a different issue type name for epics or all epics are Done.");
+            }
+        }
+        
+        // Remove duplicates (in case multiple epic types returned the same issues)
+        let mut unique_epics = Vec::new();
+        let mut seen_keys = std::collections::HashSet::new();
+        for epic in all_epics {
+            if seen_keys.insert(epic.key.clone()) {
+                unique_epics.push(epic);
+            }
+        }
+        
+        Ok(unique_epics)
+    }
 }

@@ -1394,3 +1394,362 @@ impl AssigneeSelector {
         f.render_widget(help, area);
     }
 }
+
+pub struct AllEpicsDisplay {
+    selected_index: usize,
+    epics: Vec<JiraIssue>,
+    filtered_indices: Vec<usize>,
+    search_query: String,
+    search_mode: bool,
+    scroll_offset: usize,
+    viewport_height: usize,
+}
+
+impl AllEpicsDisplay {
+    pub fn show(epics: Vec<JiraIssue>, client: &JiraClient) -> Result<()> {
+        // Setup terminal
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        let epic_count = epics.len();
+        let filtered_indices: Vec<usize> = (0..epic_count).collect();
+        
+        let mut app = Self {
+            selected_index: 0,
+            epics,
+            filtered_indices,
+            search_query: String::new(),
+            search_mode: false,
+            scroll_offset: 0,
+            viewport_height: 20, // Will be updated during first render
+        };
+        
+        let mut should_quit = false;
+        let mut message: Option<String> = None;
+
+        // Main loop
+        while !should_quit {
+            terminal.draw(|f| app.draw(f, &message))?;
+
+            if let Event::Key(key) = event::read()? {
+                if app.search_mode {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.search_mode = false;
+                        }
+                        KeyCode::Enter => {
+                            app.search_mode = false;
+                        }
+                        KeyCode::Backspace => {
+                            app.search_query.pop();
+                            app.update_filter();
+                        }
+                        KeyCode::Char(c) => {
+                            app.search_query.push(c);
+                            app.update_filter();
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => should_quit = true,
+                        KeyCode::Char('/') => {
+                            app.search_mode = true;
+                        }
+                        KeyCode::Up => {
+                            if app.selected_index > 0 {
+                                app.selected_index -= 1;
+                                app.update_scroll_offset(app.viewport_height);
+                            }
+                        }
+                        KeyCode::Down => {
+                            if app.selected_index < app.filtered_indices.len().saturating_sub(1) {
+                                app.selected_index += 1;
+                                app.update_scroll_offset(app.viewport_height);
+                            }
+                        }
+                        KeyCode::Char('v') => {
+                            if let Some(&epic_idx) = app.filtered_indices.get(app.selected_index) {
+                                if let Some(epic) = app.epics.get(epic_idx) {
+                                    let epic_key = epic.key.clone();
+                                    // Temporarily restore terminal for nested UI
+                                    disable_raw_mode()?;
+                                    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                                    terminal.show_cursor()?;
+                                    
+                                    // Fetch and show the epic with its children
+                                    println!("Fetching child issues for {}...", epic_key);
+                                    if let Ok(children) = client.get_epic_children(&epic_key) {
+                                        let _ = EpicListDisplay::show(epic, children, client);
+                                    }
+                                    
+                                    // Re-setup terminal
+                                    enable_raw_mode()?;
+                                    let mut stdout = io::stdout();
+                                    execute!(stdout, EnterAlternateScreen)?;
+                                    let backend = CrosstermBackend::new(stdout);
+                                    terminal = Terminal::new(backend)?;
+                                    
+                                    message = Some(format!("Returned from viewing {}", epic_key));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Restore terminal
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        terminal.show_cursor()?;
+
+        Ok(())
+    }
+    
+    fn update_scroll_offset(&mut self, viewport_height: usize) {
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + viewport_height {
+            self.scroll_offset = self.selected_index.saturating_sub(viewport_height - 1);
+        }
+    }
+    
+    fn update_filter(&mut self) {
+        self.filtered_indices.clear();
+        let query_lower = self.search_query.to_lowercase();
+        
+        for (idx, epic) in self.epics.iter().enumerate() {
+            let key_matches = epic.key.to_lowercase().contains(&query_lower);
+            let summary_matches = epic.fields.summary.to_lowercase().contains(&query_lower);
+            
+            if key_matches || summary_matches {
+                self.filtered_indices.push(idx);
+            }
+        }
+        
+        // Reset selection if current selection is out of bounds
+        if self.selected_index >= self.filtered_indices.len() {
+            self.selected_index = 0;
+        }
+        
+        // Reset scroll to show selected item
+        self.scroll_offset = 0;
+        self.update_scroll_offset(self.viewport_height);
+    }
+
+    fn draw(&mut self, f: &mut Frame, message: &Option<String>) {
+        let constraints = if self.search_mode {
+            vec![
+                Constraint::Length(3),     // Header
+                Constraint::Length(3),     // Search bar
+                Constraint::Min(0),        // Epic list
+                Constraint::Length(1),     // Message line
+                Constraint::Length(2),     // Help text
+            ]
+        } else {
+            vec![
+                Constraint::Length(3),     // Header
+                Constraint::Min(0),        // Epic list
+                Constraint::Length(1),     // Message line
+                Constraint::Length(2),     // Help text
+            ]
+        };
+        
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints(constraints)
+            .split(f.area());
+
+        if self.search_mode {
+            self.render_header(f, chunks[0]);
+            self.render_search_bar(f, chunks[1]);
+            self.render_epics_table(f, chunks[2]);
+            self.render_message(f, chunks[3], message);
+            self.render_help(f, chunks[4]);
+        } else {
+            self.render_header(f, chunks[0]);
+            self.render_epics_table(f, chunks[1]);
+            self.render_message(f, chunks[2], message);
+            self.render_help(f, chunks[3]);
+        }
+    }
+
+    fn render_header(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" All Epics ")
+            .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let header_text = if !self.search_query.is_empty() {
+            vec![
+                Line::from(vec![
+                    Span::styled("Filtered Epics: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(format!("{} / {}", self.filtered_indices.len(), self.epics.len())),
+                ]),
+            ]
+        } else {
+            vec![
+                Line::from(vec![
+                    Span::styled("Total Epics: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::raw(self.epics.len().to_string()),
+                ]),
+            ]
+        };
+
+        let paragraph = Paragraph::new(header_text);
+        f.render_widget(paragraph, inner);
+    }
+    
+    fn render_search_bar(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Search ")
+            .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        
+        let search_text = vec![
+            Line::from(vec![
+                Span::styled("Filter: ", Style::default().fg(Color::Cyan)),
+                Span::raw(&self.search_query),
+                Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+            ]),
+        ];
+        
+        let paragraph = Paragraph::new(search_text);
+        f.render_widget(paragraph, inner);
+    }
+
+    fn render_epics_table(&mut self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Epics ")
+            .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        if self.filtered_indices.is_empty() {
+            let text = if self.search_query.is_empty() {
+                "(No epics found)"
+            } else {
+                "(No epics match your search)"
+            };
+            let paragraph = Paragraph::new(text)
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center);
+            f.render_widget(paragraph, inner);
+            return;
+        }
+
+        // Create table headers
+        let header_cells: Vec<Cell> = vec!["Key", "Status", "Summary"]
+            .iter()
+            .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+            .collect();
+        let header = Row::new(header_cells).height(1);
+
+        // Calculate viewport dimensions for table (accounting for header)
+        let viewport_height = inner.height.saturating_sub(2) as usize; // -2 for header and border
+        self.viewport_height = viewport_height; // Store for use in key handlers
+        
+        // Use the persisted scroll_offset with filtered indices
+        let visible_start = self.scroll_offset;
+        let visible_end = (self.scroll_offset + viewport_height).min(self.filtered_indices.len());
+        
+        let rows: Vec<Row> = self.filtered_indices[visible_start..visible_end]
+            .iter()
+            .enumerate()
+            .map(|(visible_idx, &epic_idx)| {
+                let epic = &self.epics[epic_idx];
+                let actual_idx = visible_start + visible_idx;
+                
+                let style = if actual_idx == self.selected_index {
+                    Style::default().bg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
+                
+                // Color code the status
+                let status_style = match epic.fields.status.name.to_lowercase().as_str() {
+                    s if s.contains("done") || s.contains("closed") => Style::default().fg(Color::Green),
+                    s if s.contains("progress") => Style::default().fg(Color::Yellow),
+                    s if s.contains("review") => Style::default().fg(Color::Magenta),
+                    _ => Style::default().fg(Color::White),
+                };
+                
+                let cells = vec![
+                    Cell::from(epic.key.clone()).style(style),
+                    Cell::from(epic.fields.status.name.clone()).style(style.patch(status_style)),
+                    Cell::from(epic.fields.summary.clone()).style(style),
+                ];
+                
+                Row::new(cells).height(1)
+            })
+            .collect();
+
+        // Update title with scroll indicators
+        let title = if self.epics.len() > viewport_height {
+            format!(" Epics [{}-{} of {}] ", 
+                visible_start + 1,
+                visible_end,
+                self.epics.len()
+            )
+        } else {
+            " Epics ".to_string()
+        };
+
+        let table = Table::new(
+            rows,
+            vec![
+                Constraint::Length(12),     // Key
+                Constraint::Length(15),     // Status
+                Constraint::Min(20),        // Summary (takes remaining space)
+            ]
+        )
+        .header(header)
+        .block(Block::default().title(title));
+
+        f.render_widget(table, inner);
+    }
+
+    fn render_message(&self, f: &mut Frame, area: Rect, message: &Option<String>) {
+        if let Some(msg) = message {
+            let style = if msg.starts_with('✓') {
+                Style::default().fg(Color::Green)
+            } else if msg.starts_with('✗') {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            
+            let text = Paragraph::new(msg.as_str())
+                .style(style)
+                .alignment(Alignment::Center);
+            f.render_widget(text, area);
+        }
+    }
+
+    fn render_help(&self, f: &mut Frame, area: Rect) {
+        let help_text = if self.search_mode {
+            "Type to search | Enter/ESC: Exit search | Backspace: Delete"
+        } else {
+            "↑/↓: Navigate | v: View Epic | /: Search | q/ESC: Quit"
+        };
+        
+        let help = Paragraph::new(help_text)
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(help, area);
+    }
+}
