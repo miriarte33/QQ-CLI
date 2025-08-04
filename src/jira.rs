@@ -24,8 +24,10 @@ pub struct IssueFields {
     pub parent: Option<Box<JiraIssue>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct User {
+    #[serde(rename = "accountId")]
+    pub account_id: String,
     #[serde(rename = "displayName")]
     pub display_name: String,
     #[serde(rename = "emailAddress")]
@@ -89,13 +91,11 @@ pub struct JiraClient {
     client: Client,
     base_url: String,
     auth_header: String,
-    username: String,
 }
 
 impl JiraClient {
     pub fn new(config: Config) -> Self {
         let client = Client::new();
-        let username = config.username.clone();
         let auth = format!("{}:{}", config.username, config.api_token);
         let auth_header = format!(
             "Basic {}",
@@ -106,7 +106,6 @@ impl JiraClient {
             client,
             base_url: config.jira_url.trim_end_matches('/').to_string(),
             auth_header,
-            username,
         }
     }
     
@@ -278,42 +277,17 @@ impl JiraClient {
         Ok(transitions_response.transitions)
     }
     
-    pub fn assign_issue(&self, issue_key: &str) -> Result<()> {
+    pub fn assign_issue(&self, issue_key: &str, account_id: Option<&str>) -> Result<()> {
         let url = format!("{}/rest/api/3/issue/{}/assignee", self.base_url, issue_key);
         
         #[derive(Debug, Serialize)]
         struct AssignRequest {
             #[serde(rename = "accountId")]
             account_id: Option<String>,
-            name: Option<String>,
         }
         
-        // First try to get the user's account ID using the username
-        let myself_url = format!("{}/rest/api/3/myself", self.base_url);
-        let myself_response = self.client
-            .get(&myself_url)
-            .header(AUTHORIZATION, &self.auth_header)
-            .header(ACCEPT, "application/json")
-            .send()
-            .context("Failed to get current user info")?;
-        
-        let account_id = if myself_response.status().is_success() {
-            #[derive(Debug, Deserialize)]
-            struct User {
-                #[serde(rename = "accountId")]
-                account_id: Option<String>,
-            }
-            
-            let user: User = myself_response.json()
-                .context("Failed to parse user response")?;
-            user.account_id
-        } else {
-            None
-        };
-        
         let assign_request = AssignRequest {
-            account_id: account_id.clone(),
-            name: if account_id.is_none() { Some(self.username.clone()) } else { None },
+            account_id: account_id.map(|id| id.to_string()),
         };
         
         let response = self.client
@@ -369,8 +343,11 @@ impl JiraClient {
     }
     
     pub fn pickup_issue(&self, issue_key: &str) -> Result<()> {
+        // Get current user's account ID
+        let current_user = self.get_current_user()?;
+        
         // First assign the issue to yourself
-        self.assign_issue(issue_key)?;
+        self.assign_issue(issue_key, Some(&current_user.account_id))?;
         
         // Then transition it to In Progress
         self.transition_to_in_progress(issue_key)?;
@@ -473,5 +450,57 @@ impl JiraClient {
             .context("Failed to parse JIRA search response")?;
         
         Ok(search_response.issues)
+    }
+    
+    pub fn get_assignable_users(&self, issue_key: &str) -> Result<Vec<User>> {
+        let url = format!("{}/rest/api/3/user/assignable/search", self.base_url);
+        
+        let response = self.client
+            .get(&url)
+            .header(AUTHORIZATION, &self.auth_header)
+            .header(ACCEPT, "application/json")
+            .query(&[
+                ("issueKey", issue_key),
+                ("maxResults", "50") // Reasonable limit for UI display
+            ])
+            .send()
+            .context("Failed to get assignable users")?;
+        
+        let status = response.status();
+        let response_text = response.text()?;
+        
+        if !status.is_success() {
+            eprintln!("JIRA API error response: {}", response_text);
+            anyhow::bail!("Failed to get assignable users: {}", status);
+        }
+        
+        let users: Vec<User> = serde_json::from_str(&response_text)
+            .context("Failed to parse assignable users response")?;
+        
+        Ok(users)
+    }
+    
+    pub fn get_current_user(&self) -> Result<User> {
+        let url = format!("{}/rest/api/3/myself", self.base_url);
+        
+        let response = self.client
+            .get(&url)
+            .header(AUTHORIZATION, &self.auth_header)
+            .header(ACCEPT, "application/json")
+            .send()
+            .context("Failed to get current user info")?;
+        
+        let status = response.status();
+        let response_text = response.text()?;
+        
+        if !status.is_success() {
+            eprintln!("JIRA API error response: {}", response_text);
+            anyhow::bail!("Failed to get current user: {}", status);
+        }
+        
+        let user: User = serde_json::from_str(&response_text)
+            .context("Failed to parse current user response")?;
+        
+        Ok(user)
     }
 }

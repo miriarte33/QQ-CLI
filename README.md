@@ -12,7 +12,7 @@ cargo install --path .
 
 ### JIRA Integration
 
-Automatically extracts JIRA ticket IDs from git branch names and provides quick access to ticket operations.
+Automatically extracts JIRA ticket IDs from git branch names and provides quick access to ticket operations. Includes powerful interactive views for managing epics and your assigned tickets.
 
 #### Configuration
 
@@ -37,7 +37,20 @@ The JIRA commands automatically detect the ticket ID from your current git branc
 
 ##### Get ticket details
 ```bash
-qq jira get
+qq jira get         # Shows ticket details in a rich UI
+qq jira get parent  # Shows the parent epic with all its children
+```
+
+##### View and manage epics
+Interactive view for managing all tickets in an epic:
+```bash
+qq jira epic EPIC-123
+```
+
+##### View your assigned tickets
+Interactive view showing all tickets assigned to you (excluding Done):
+```bash
+qq jira mine
 ```
 
 ##### Add a comment
@@ -50,16 +63,6 @@ qq jira comment "Updated the implementation as discussed"
 qq jira close
 ```
 
-##### Assign ticket to yourself
-```bash
-qq jira assign
-```
-
-##### Pick up a ticket (assign to yourself and move to In Progress)
-```bash
-qq jira pickup
-```
-
 ##### Start working on a new ticket
 Creates a new feature branch, assigns the ticket to yourself, and moves it to In Progress:
 ```bash
@@ -67,20 +70,50 @@ qq jira start PROJ-123
 ```
 This will create and switch to a branch named `feature/PROJ-123`.
 
+#### Interactive Views
+
+The `epic` and `mine` commands provide interactive terminal UIs with the following keyboard shortcuts:
+
+##### Common Controls
+- `↑/↓` - Navigate through the list
+- `v` - View the selected ticket details
+- `p` - Move ticket to In Progress
+- `c` - Close the selected ticket
+- `s` - Start working on ticket (creates branch, assigns to you, moves to In Progress)
+- `q` or `ESC` - Quit the view
+
+##### Epic View Controls
+- `a` - Assign ticket (opens user selection)
+  - In user selection:
+    - `↑/↓` - Navigate users
+    - `/` - Search for users
+    - `Enter` - Select user
+    - `ESC` - Cancel
+
+##### Mine View Controls
+- `e` - View the parent epic (if ticket has one)
+
+#### Features
+
+- **Rich Terminal UI**: All interactive views use a modern terminal UI with colors and proper formatting
+- **Real-time Updates**: After actions, the ticket data refreshes automatically
+- **Scrollable Lists**: Long lists of tickets or users scroll smoothly
+- **Search Functionality**: The assignee selector includes search to filter users
+- **Unassign Option**: When assigning, you can select "None" to unassign a ticket
+
 ## Examples
 
+### Basic Commands
 ```bash
 # On branch "feature/PROJ-123-add-authentication"
 $ qq jira get
 
-Fetching details for ticket: PROJ-123
+# Opens a rich UI showing ticket details including description, status, and assignee
 
-Ticket: PROJ-123
-Summary: Add user authentication
-Status: In Progress
+$ qq jira get parent
 
-Description:
-Implement OAuth2 authentication for the application...
+# If PROJ-123 is part of an epic, shows the epic with all its child tickets
+# Same interactive view as 'qq jira epic EPIC-ID'
 
 $ qq jira comment "Authentication module completed, ready for review"
 Adding comment to ticket: PROJ-123
@@ -89,6 +122,41 @@ Comment added successfully!
 $ qq jira close
 Closing ticket: PROJ-123
 Ticket closed successfully!
+```
+
+### Interactive Epic Management
+```bash
+$ qq jira epic EPIC-100
+
+# Opens interactive view showing all tickets in the epic
+# Use arrow keys to navigate, 'a' to assign tickets, 'p' to move to progress, etc.
+
+Epic: EPIC-100 - Q4 Authentication Features
+Child Issues (5):
+┌─────────────┬────────────────┬─────────────────────────────────┬──────────────┐
+│ Key         │ Status         │ Summary                         │ Assignee     │
+├─────────────┼────────────────┼─────────────────────────────────┼──────────────┤
+│ PROJ-123 ▶  │ In Progress    │ Add OAuth2 authentication       │ John Doe     │
+│ PROJ-124    │ To Do          │ Implement password reset        │ Unassigned   │
+│ PROJ-125    │ In Review      │ Add two-factor authentication   │ Jane Smith   │
+└─────────────┴────────────────┴─────────────────────────────────┴──────────────┘
+```
+
+### Managing Your Tickets
+```bash
+$ qq jira mine
+
+# Shows all tickets assigned to you in an interactive view
+# Press 'e' to view the parent epic, 'v' to view details, 's' to start working
+
+My Issues:
+┌─────────────┬─────────────┬────────────────┬─────────────────────────────────┐
+│ Key         │ Parent      │ Status         │ Summary                         │
+├─────────────┼─────────────┼────────────────┼─────────────────────────────────┤
+│ PROJ-123 ▶  │ EPIC-100    │ In Progress    │ Add OAuth2 authentication       │
+│ PROJ-127    │ EPIC-101    │ To Do          │ Update API documentation        │
+│ PROJ-130    │ —           │ In Review      │ Fix login redirect issue        │
+└─────────────┴─────────────┴────────────────┴─────────────────────────────────┘
 ```
 
 ## Future Features

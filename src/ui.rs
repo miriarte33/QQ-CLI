@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap},
     Terminal, Frame,
 };
 use crossterm::{
@@ -15,7 +15,7 @@ use crossterm::{
 use std::io;
 use serde_json::Value;
 
-use crate::jira::{JiraIssue, JiraClient};
+use crate::jira::{JiraIssue, JiraClient, User};
 
 pub struct JiraIssueDisplay {
     scroll_offset: u16,
@@ -329,9 +329,19 @@ impl JiraIssueDisplay {
 pub struct EpicListDisplay {
     selected_index: usize,
     children: Vec<JiraIssue>,
+    scroll_offset: usize,
+    viewport_height: usize,
 }
 
 impl EpicListDisplay {
+    fn update_scroll_offset(&mut self, viewport_height: usize) {
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + viewport_height {
+            self.scroll_offset = self.selected_index.saturating_sub(viewport_height - 1);
+        }
+    }
+    
     pub fn show(epic: &JiraIssue, children: Vec<JiraIssue>, client: &JiraClient) -> Result<()> {
         // Setup terminal
         enable_raw_mode()?;
@@ -343,6 +353,8 @@ impl EpicListDisplay {
         let mut app = Self {
             selected_index: 0,
             children,
+            scroll_offset: 0,
+            viewport_height: 20, // Will be updated during first render
         };
         
         let mut should_quit = false;
@@ -358,61 +370,127 @@ impl EpicListDisplay {
                     KeyCode::Up => {
                         if app.selected_index > 0 {
                             app.selected_index -= 1;
+                            // Estimate viewport height - can be refined based on terminal size
+                            app.update_scroll_offset(app.viewport_height);
                         }
                     }
                     KeyCode::Down => {
                         if app.selected_index < app.children.len().saturating_sub(1) {
                             app.selected_index += 1;
+                            // Estimate viewport height - can be refined based on terminal size
+                            app.update_scroll_offset(app.viewport_height);
                         }
                     }
                     KeyCode::Char('a') => {
                         if let Some(issue) = app.children.get(app.selected_index) {
-                            message = Some(format!("Assigning {} to yourself...", issue.key));
-                            terminal.draw(|f| app.draw(f, epic, &message))?;
+                            let issue_key = issue.key.clone();
+                            // Temporarily restore terminal for assignee selection
+                            disable_raw_mode()?;
+                            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                            terminal.show_cursor()?;
                             
-                            match client.assign_issue(&issue.key) {
-                                Ok(_) => {
-                                    message = Some(format!("✓ {} assigned to you", issue.key));
-                                    // Refresh the issue data
-                                    if let Ok(updated_issue) = client.get_issue(&issue.key) {
-                                        app.children[app.selected_index] = updated_issue;
+                            println!("Fetching assignable users for {}...", issue_key);
+                            
+                            // Get current user and assignable users
+                            let (current_user_id, selected_account_id) = match (
+                                client.get_current_user(),
+                                client.get_assignable_users(&issue_key)
+                            ) {
+                                (Ok(current_user), Ok(users)) => {
+                                    let current_id = current_user.account_id.clone();
+                                    let selected = AssigneeSelector::show(users, current_user.account_id)?;
+                                    (current_id, selected)
+                                }
+                                (Err(e), _) | (_, Err(e)) => {
+                                    eprintln!("Failed to fetch users: {}", e);
+                                    (String::new(), None)
+                                }
+                            };
+                            
+                            // Re-setup terminal
+                            enable_raw_mode()?;
+                            let mut stdout = io::stdout();
+                            execute!(stdout, EnterAlternateScreen)?;
+                            let backend = CrosstermBackend::new(stdout);
+                            terminal = Terminal::new(backend)?;
+                            
+                            if let Some(account_id) = selected_account_id {
+                                if account_id == "UNASSIGN" {
+                                    // Handle unassignment
+                                    message = Some(format!("Unassigning {} ...", issue_key));
+                                    terminal.draw(|f| app.draw(f, epic, &message))?;
+                                    
+                                    match client.assign_issue(&issue_key, None) {
+                                        Ok(_) => {
+                                            message = Some(format!("✓ {} unassigned", issue_key));
+                                            // Refresh the issue data
+                                            if let Ok(updated_issue) = client.get_issue(&issue_key) {
+                                                app.children[app.selected_index] = updated_issue;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            message = Some(format!("✗ Failed to unassign {}: {}", issue_key, e));
+                                        }
+                                    }
+                                } else {
+                                    // Handle normal assignment
+                                    message = Some(format!("Assigning {} ...", issue_key));
+                                    terminal.draw(|f| app.draw(f, epic, &message))?;
+                                    
+                                    match client.assign_issue(&issue_key, Some(&account_id)) {
+                                        Ok(_) => {
+                                            let assignee_text = if account_id == current_user_id {
+                                                "you".to_string()
+                                            } else {
+                                                "selected user".to_string()
+                                            };
+                                            message = Some(format!("✓ {} assigned to {}", issue_key, assignee_text));
+                                            // Refresh the issue data
+                                            if let Ok(updated_issue) = client.get_issue(&issue_key) {
+                                                app.children[app.selected_index] = updated_issue;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            message = Some(format!("✗ Failed to assign {}: {}", issue_key, e));
+                                        }
                                     }
                                 }
-                                Err(e) => {
-                                    message = Some(format!("✗ Failed to assign {}: {}", issue.key, e));
-                                }
+                            } else {
+                                message = Some("Assignment cancelled".to_string());
                             }
                         }
                     }
                     KeyCode::Char('p') => {
                         if let Some(issue) = app.children.get(app.selected_index) {
-                            message = Some(format!("Picking up {}...", issue.key));
+                            let issue_key = issue.key.clone();
+                            message = Some(format!("Moving {} to In Progress...", issue_key));
                             terminal.draw(|f| app.draw(f, epic, &message))?;
                             
-                            match client.pickup_issue(&issue.key) {
+                            match client.transition_to_in_progress(&issue_key) {
                                 Ok(_) => {
-                                    message = Some(format!("✓ {} assigned and moved to In Progress", issue.key));
+                                    message = Some(format!("✓ {} moved to In Progress", issue_key));
                                     // Refresh the issue data
-                                    if let Ok(updated_issue) = client.get_issue(&issue.key) {
+                                    if let Ok(updated_issue) = client.get_issue(&issue_key) {
                                         app.children[app.selected_index] = updated_issue;
                                     }
                                 }
                                 Err(e) => {
-                                    message = Some(format!("✗ Failed to pickup {}: {}", issue.key, e));
+                                    message = Some(format!("✗ Failed to move {} to In Progress: {}", issue_key, e));
                                 }
                             }
                         }
                     }
                     KeyCode::Char('s') => {
                         if let Some(issue) = app.children.get(app.selected_index) {
-                            message = Some(format!("Starting {}...", issue.key));
+                            let issue_key = issue.key.clone();
+                            message = Some(format!("Starting {}...", issue_key));
                             terminal.draw(|f| app.draw(f, epic, &message))?;
                             
                             // Create feature branch
                             use git2::Repository;
                             match Repository::open(".") {
                                 Ok(repo) => {
-                                    let branch_name = format!("feature/{}", issue.key);
+                                    let branch_name = format!("feature/{}", issue_key);
                                     
                                     // Get the current HEAD commit
                                     match repo.head()
@@ -428,9 +506,9 @@ impl EpicListDisplay {
                                                         let _ = repo.set_head(&format!("refs/heads/{}", branch_name));
                                                         
                                                         // Now pickup the issue
-                                                        match client.pickup_issue(&issue.key) {
+                                                        match client.pickup_issue(&issue_key) {
                                                             Ok(_) => {
-                                                                message = Some(format!("✓ Created branch '{}' and picked up {}", branch_name, issue.key));
+                                                                message = Some(format!("✓ Created branch '{}' and picked up {}", branch_name, issue_key));
                                                                 should_quit = true; // Exit after successful start
                                                             }
                                                             Err(e) => {
@@ -459,13 +537,14 @@ impl EpicListDisplay {
                     }
                     KeyCode::Char('v') => {
                         if let Some(issue) = app.children.get(app.selected_index) {
+                            let issue_key = issue.key.clone();
                             // Temporarily restore terminal for nested UI
                             disable_raw_mode()?;
                             execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
                             terminal.show_cursor()?;
                             
                             // Show the issue details
-                            println!("Viewing issue: {}", issue.key);
+                            println!("Viewing issue: {}", issue_key);
                             let _ = JiraIssueDisplay::show(issue);
                             
                             // Re-setup terminal for epic list
@@ -475,24 +554,25 @@ impl EpicListDisplay {
                             let backend = CrosstermBackend::new(stdout);
                             terminal = Terminal::new(backend)?;
                             
-                            message = Some(format!("Returned from viewing {}", issue.key));
+                            message = Some(format!("Returned from viewing {}", issue_key));
                         }
                     }
                     KeyCode::Char('c') => {
                         if let Some(issue) = app.children.get(app.selected_index) {
-                            message = Some(format!("Closing {}...", issue.key));
+                            let issue_key = issue.key.clone();
+                            message = Some(format!("Closing {}...", issue_key));
                             terminal.draw(|f| app.draw(f, epic, &message))?;
                             
-                            match client.close_issue(&issue.key) {
+                            match client.close_issue(&issue_key) {
                                 Ok(_) => {
-                                    message = Some(format!("✓ {} closed successfully", issue.key));
+                                    message = Some(format!("✓ {} closed successfully", issue_key));
                                     // Refresh the issue data
-                                    if let Ok(updated_issue) = client.get_issue(&issue.key) {
+                                    if let Ok(updated_issue) = client.get_issue(&issue_key) {
                                         app.children[app.selected_index] = updated_issue;
                                     }
                                 }
                                 Err(e) => {
-                                    message = Some(format!("✗ Failed to close {}: {}", issue.key, e));
+                                    message = Some(format!("✗ Failed to close {}: {}", issue_key, e));
                                 }
                             }
                         }
@@ -510,7 +590,7 @@ impl EpicListDisplay {
         Ok(())
     }
 
-    fn draw(&self, f: &mut Frame, epic: &JiraIssue, message: &Option<String>) {
+    fn draw(&mut self, f: &mut Frame, epic: &JiraIssue, message: &Option<String>) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
@@ -554,7 +634,7 @@ impl EpicListDisplay {
         f.render_widget(paragraph, inner);
     }
 
-    fn render_children_table(&self, f: &mut Frame, area: Rect) {
+    fn render_children_table(&mut self, f: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" Child Issues ({}) ", self.children.len()))
@@ -578,35 +658,59 @@ impl EpicListDisplay {
             .collect();
         let header = Row::new(header_cells).height(1);
 
-        // Create table rows
-        let rows: Vec<Row> = self.children.iter().enumerate().map(|(idx, issue)| {
-            let assignee = issue.fields.assignee.as_ref()
-                .map(|u| u.display_name.clone())
-                .unwrap_or_else(|| "Unassigned".to_string());
-            
-            let style = if idx == self.selected_index {
-                Style::default().bg(Color::DarkGray)
-            } else {
-                Style::default()
-            };
-            
-            // Color code the status
-            let status_style = match issue.fields.status.name.to_lowercase().as_str() {
-                s if s.contains("done") || s.contains("closed") => Style::default().fg(Color::Green),
-                s if s.contains("progress") => Style::default().fg(Color::Yellow),
-                s if s.contains("review") => Style::default().fg(Color::Magenta),
-                _ => Style::default().fg(Color::White),
-            };
-            
-            let cells = vec![
-                Cell::from(issue.key.clone()).style(style),
-                Cell::from(issue.fields.status.name.clone()).style(style.patch(status_style)),
-                Cell::from(issue.fields.summary.clone()).style(style),
-                Cell::from(assignee).style(style),
-            ];
-            
-            Row::new(cells).height(1)
-        }).collect();
+        // Calculate viewport dimensions for table (accounting for header)
+        let viewport_height = inner.height.saturating_sub(2) as usize; // -2 for header and border
+        self.viewport_height = viewport_height; // Store for use in key handlers
+        
+        // Use the persisted scroll_offset
+        let visible_start = self.scroll_offset;
+        let visible_end = (self.scroll_offset + viewport_height).min(self.children.len());
+        
+        let rows: Vec<Row> = self.children[visible_start..visible_end]
+            .iter()
+            .enumerate()
+            .map(|(visible_idx, issue)| {
+                let actual_idx = visible_start + visible_idx;
+                let assignee = issue.fields.assignee.as_ref()
+                    .map(|u| u.display_name.clone())
+                    .unwrap_or_else(|| "Unassigned".to_string());
+                
+                let style = if actual_idx == self.selected_index {
+                    Style::default().bg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
+                
+                // Color code the status
+                let status_style = match issue.fields.status.name.to_lowercase().as_str() {
+                    s if s.contains("done") || s.contains("closed") => Style::default().fg(Color::Green),
+                    s if s.contains("progress") => Style::default().fg(Color::Yellow),
+                    s if s.contains("review") => Style::default().fg(Color::Magenta),
+                    _ => Style::default().fg(Color::White),
+                };
+                
+                let cells = vec![
+                    Cell::from(issue.key.clone()).style(style),
+                    Cell::from(issue.fields.status.name.clone()).style(style.patch(status_style)),
+                    Cell::from(issue.fields.summary.clone()).style(style),
+                    Cell::from(assignee).style(style),
+                ];
+                
+                Row::new(cells).height(1)
+            })
+            .collect();
+
+        // Add scroll indicators in the title
+        let title = if self.children.len() > viewport_height {
+            format!(" Child Issues ({}) [{}-{} of {}] ", 
+                self.children.len(),
+                visible_start + 1,
+                visible_end,
+                self.children.len()
+            )
+        } else {
+            format!(" Child Issues ({}) ", self.children.len())
+        };
 
         let table = Table::new(
             rows,
@@ -618,7 +722,7 @@ impl EpicListDisplay {
             ]
         )
         .header(header)
-        .block(Block::default());
+        .block(Block::default().title(title));
 
         f.render_widget(table, inner);
     }
@@ -641,7 +745,7 @@ impl EpicListDisplay {
     }
 
     fn render_help(&self, f: &mut Frame, area: Rect) {
-        let help = Paragraph::new("↑/↓: Navigate | v: View | a: Assign | p: Pickup | c: Close | s: Start | q/ESC: Quit")
+        let help = Paragraph::new("↑/↓: Navigate | v: View | a: Assign to... | p: In Progress | c: Close | s: Start | q/ESC: Quit")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
         f.render_widget(help, area);
@@ -651,9 +755,19 @@ impl EpicListDisplay {
 pub struct MyIssuesDisplay {
     selected_index: usize,
     issues: Vec<JiraIssue>,
+    scroll_offset: usize,
+    viewport_height: usize,
 }
 
 impl MyIssuesDisplay {
+    fn update_scroll_offset(&mut self, viewport_height: usize) {
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + viewport_height {
+            self.scroll_offset = self.selected_index.saturating_sub(viewport_height - 1);
+        }
+    }
+    
     pub fn show(issues: Vec<JiraIssue>, client: &JiraClient) -> Result<()> {
         // Setup terminal
         enable_raw_mode()?;
@@ -665,6 +779,8 @@ impl MyIssuesDisplay {
         let mut app = Self {
             selected_index: 0,
             issues,
+            scroll_offset: 0,
+            viewport_height: 20, // Will be updated during first render
         };
         
         let mut should_quit = false;
@@ -680,22 +796,25 @@ impl MyIssuesDisplay {
                     KeyCode::Up => {
                         if app.selected_index > 0 {
                             app.selected_index -= 1;
+                            app.update_scroll_offset(app.viewport_height); // Typical terminal height
                         }
                     }
                     KeyCode::Down => {
                         if app.selected_index < app.issues.len().saturating_sub(1) {
                             app.selected_index += 1;
+                            app.update_scroll_offset(app.viewport_height); // Typical terminal height
                         }
                     }
                     KeyCode::Char('v') => {
                         if let Some(issue) = app.issues.get(app.selected_index) {
+                            let issue_key = issue.key.clone();
                             // Temporarily restore terminal for nested UI
                             disable_raw_mode()?;
                             execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
                             terminal.show_cursor()?;
                             
                             // Show the issue details
-                            println!("Viewing issue: {}", issue.key);
+                            println!("Viewing issue: {}", issue_key);
                             let _ = JiraIssueDisplay::show(issue);
                             
                             // Re-setup terminal
@@ -705,38 +824,40 @@ impl MyIssuesDisplay {
                             let backend = CrosstermBackend::new(stdout);
                             terminal = Terminal::new(backend)?;
                             
-                            message = Some(format!("Returned from viewing {}", issue.key));
+                            message = Some(format!("Returned from viewing {}", issue_key));
                         }
                     }
                     KeyCode::Char('p') => {
                         if let Some(issue) = app.issues.get(app.selected_index) {
-                            message = Some(format!("Moving {} to In Progress...", issue.key));
+                            let issue_key = issue.key.clone();
+                            message = Some(format!("Moving {} to In Progress...", issue_key));
                             terminal.draw(|f| app.draw(f, &message))?;
                             
-                            match client.transition_to_in_progress(&issue.key) {
+                            match client.transition_to_in_progress(&issue_key) {
                                 Ok(_) => {
-                                    message = Some(format!("✓ {} moved to In Progress", issue.key));
+                                    message = Some(format!("✓ {} moved to In Progress", issue_key));
                                     // Refresh the issue data
-                                    if let Ok(updated_issue) = client.get_issue(&issue.key) {
+                                    if let Ok(updated_issue) = client.get_issue(&issue_key) {
                                         app.issues[app.selected_index] = updated_issue;
                                     }
                                 }
                                 Err(e) => {
-                                    message = Some(format!("✗ Failed to move {}: {}", issue.key, e));
+                                    message = Some(format!("✗ Failed to move {}: {}", issue_key, e));
                                 }
                             }
                         }
                     }
                     KeyCode::Char('s') => {
                         if let Some(issue) = app.issues.get(app.selected_index) {
-                            message = Some(format!("Starting {}...", issue.key));
+                            let issue_key = issue.key.clone();
+                            message = Some(format!("Starting {}...", issue_key));
                             terminal.draw(|f| app.draw(f, &message))?;
                             
                             // Create feature branch
                             use git2::Repository;
                             match Repository::open(".") {
                                 Ok(repo) => {
-                                    let branch_name = format!("feature/{}", issue.key);
+                                    let branch_name = format!("feature/{}", issue_key);
                                     
                                     // Get the current HEAD commit
                                     match repo.head()
@@ -752,9 +873,9 @@ impl MyIssuesDisplay {
                                                         let _ = repo.set_head(&format!("refs/heads/{}", branch_name));
                                                         
                                                         // Now pickup the issue
-                                                        match client.pickup_issue(&issue.key) {
+                                                        match client.pickup_issue(&issue_key) {
                                                             Ok(_) => {
-                                                                message = Some(format!("✓ Created branch '{}' and picked up {}", branch_name, issue.key));
+                                                                message = Some(format!("✓ Created branch '{}' and picked up {}", branch_name, issue_key));
                                                                 should_quit = true; // Exit after successful start
                                                             }
                                                             Err(e) => {
@@ -784,14 +905,15 @@ impl MyIssuesDisplay {
                     KeyCode::Char('e') => {
                         if let Some(issue) = app.issues.get(app.selected_index) {
                             if let Some(parent) = &issue.fields.parent {
+                                let parent_key = parent.key.clone();
                                 // Temporarily restore terminal
                                 disable_raw_mode()?;
                                 execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
                                 terminal.show_cursor()?;
                                 
                                 // Show the parent epic
-                                println!("Fetching epic details for: {}", parent.key);
-                                if let Ok(children) = client.get_epic_children(&parent.key) {
+                                println!("Fetching epic details for: {}", parent_key);
+                                if let Ok(children) = client.get_epic_children(&parent_key) {
                                     println!("Fetching child issues...");
                                     let _ = EpicListDisplay::show(parent, children, client);
                                 }
@@ -803,7 +925,7 @@ impl MyIssuesDisplay {
                                 let backend = CrosstermBackend::new(stdout);
                                 terminal = Terminal::new(backend)?;
                                 
-                                message = Some(format!("Returned from viewing epic {}", parent.key));
+                                message = Some(format!("Returned from viewing epic {}", parent_key));
                             } else {
                                 message = Some("This issue is not part of an epic".to_string());
                             }
@@ -822,7 +944,7 @@ impl MyIssuesDisplay {
         Ok(())
     }
 
-    fn draw(&self, f: &mut Frame, message: &Option<String>) {
+    fn draw(&mut self, f: &mut Frame, message: &Option<String>) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
@@ -860,7 +982,7 @@ impl MyIssuesDisplay {
         f.render_widget(paragraph, inner);
     }
 
-    fn render_issues_table(&self, f: &mut Frame, area: Rect) {
+    fn render_issues_table(&mut self, f: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" Issues ")
@@ -884,35 +1006,58 @@ impl MyIssuesDisplay {
             .collect();
         let header = Row::new(header_cells).height(1);
 
-        // Create table rows
-        let rows: Vec<Row> = self.issues.iter().enumerate().map(|(idx, issue)| {
-            let parent = issue.fields.parent.as_ref()
-                .map(|p| p.key.clone())
-                .unwrap_or_else(|| "—".to_string());
-            
-            let style = if idx == self.selected_index {
-                Style::default().bg(Color::DarkGray)
-            } else {
-                Style::default()
-            };
-            
-            // Color code the status
-            let status_style = match issue.fields.status.name.to_lowercase().as_str() {
-                s if s.contains("done") || s.contains("closed") => Style::default().fg(Color::Green),
-                s if s.contains("progress") => Style::default().fg(Color::Yellow),
-                s if s.contains("review") => Style::default().fg(Color::Magenta),
-                _ => Style::default().fg(Color::White),
-            };
-            
-            let cells = vec![
-                Cell::from(issue.key.clone()).style(style),
-                Cell::from(parent).style(style),
-                Cell::from(issue.fields.status.name.clone()).style(style.patch(status_style)),
-                Cell::from(issue.fields.summary.clone()).style(style),
-            ];
-            
-            Row::new(cells).height(1)
-        }).collect();
+        // Calculate viewport dimensions for table (accounting for header)
+        let viewport_height = inner.height.saturating_sub(2) as usize; // -2 for header and border
+        self.viewport_height = viewport_height; // Store for use in key handlers
+        
+        // Use the persisted scroll_offset
+        let visible_start = self.scroll_offset;
+        let visible_end = (self.scroll_offset + viewport_height).min(self.issues.len());
+        
+        let rows: Vec<Row> = self.issues[visible_start..visible_end]
+            .iter()
+            .enumerate()
+            .map(|(visible_idx, issue)| {
+                let actual_idx = visible_start + visible_idx;
+                let parent = issue.fields.parent.as_ref()
+                    .map(|p| p.key.clone())
+                    .unwrap_or_else(|| "—".to_string());
+                
+                let style = if actual_idx == self.selected_index {
+                    Style::default().bg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
+                
+                // Color code the status
+                let status_style = match issue.fields.status.name.to_lowercase().as_str() {
+                    s if s.contains("done") || s.contains("closed") => Style::default().fg(Color::Green),
+                    s if s.contains("progress") => Style::default().fg(Color::Yellow),
+                    s if s.contains("review") => Style::default().fg(Color::Magenta),
+                    _ => Style::default().fg(Color::White),
+                };
+                
+                let cells = vec![
+                    Cell::from(issue.key.clone()).style(style),
+                    Cell::from(parent).style(style),
+                    Cell::from(issue.fields.status.name.clone()).style(style.patch(status_style)),
+                    Cell::from(issue.fields.summary.clone()).style(style),
+                ];
+                
+                Row::new(cells).height(1)
+            })
+            .collect();
+
+        // Update title with scroll indicators
+        let title = if self.issues.len() > viewport_height {
+            format!(" Issues [{}-{} of {}] ", 
+                visible_start + 1,
+                visible_end,
+                self.issues.len()
+            )
+        } else {
+            " Issues ".to_string()
+        };
 
         let table = Table::new(
             rows,
@@ -924,7 +1069,7 @@ impl MyIssuesDisplay {
             ]
         )
         .header(header)
-        .block(Block::default());
+        .block(Block::default().title(title));
 
         f.render_widget(table, inner);
     }
@@ -948,6 +1093,302 @@ impl MyIssuesDisplay {
 
     fn render_help(&self, f: &mut Frame, area: Rect) {
         let help = Paragraph::new("↑/↓: Navigate | v: View | e: Epic | p: In Progress | s: Start | q/ESC: Quit")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(help, area);
+    }
+}
+
+pub struct AssigneeSelector {
+    selected_index: usize,
+    users: Vec<User>,
+    filtered_indices: Vec<usize>,
+    current_user_id: String,
+    search_query: String,
+    search_mode: bool,
+    scroll_offset: usize,
+    viewport_height: usize,
+}
+
+impl AssigneeSelector {
+    pub fn show(users: Vec<User>, current_user_id: String) -> Result<Option<String>> {
+        // Setup terminal
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        let filtered_indices: Vec<usize> = (0..users.len()).collect();
+        let mut app = Self {
+            selected_index: 0,
+            users,
+            filtered_indices,
+            current_user_id,
+            search_query: String::new(),
+            search_mode: false,
+            scroll_offset: 0,
+            viewport_height: 20, // Will be updated during first render
+        };
+        
+        let mut selected_account_id: Option<String> = None;
+        let mut should_quit = false;
+
+        // Main loop
+        while !should_quit {
+            terminal.draw(|f| app.draw(f))?;
+
+            if let Event::Key(key) = event::read()? {
+                if app.search_mode {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.search_mode = false;
+                        }
+                        KeyCode::Enter => {
+                            app.search_mode = false;
+                        }
+                        KeyCode::Backspace => {
+                            app.search_query.pop();
+                            app.update_filter();
+                        }
+                        KeyCode::Char(c) => {
+                            app.search_query.push(c);
+                            app.update_filter();
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => should_quit = true,
+                        KeyCode::Char('/') => {
+                            app.search_mode = true;
+                        }
+                        KeyCode::Up => {
+                            if app.selected_index > 0 {
+                                app.selected_index -= 1;
+                                app.update_scroll_offset(app.viewport_height); // Typical terminal height
+                            }
+                        }
+                        KeyCode::Down => {
+                            let total_items = app.filtered_indices.len() + 2; // +2 for "Myself" and "None"
+                            if app.selected_index < total_items.saturating_sub(1) {
+                                app.selected_index += 1;
+                                app.update_scroll_offset(app.viewport_height);
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if app.selected_index == 0 {
+                                // "Myself" selected
+                                selected_account_id = Some(app.current_user_id.clone());
+                            } else if app.selected_index == 1 {
+                                // "None" selected - return a special marker
+                                selected_account_id = Some("UNASSIGN".to_string());
+                            } else if let Some(&user_idx) = app.filtered_indices.get(app.selected_index - 2) {
+                                if let Some(user) = app.users.get(user_idx) {
+                                    selected_account_id = Some(user.account_id.clone());
+                                }
+                            }
+                            should_quit = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Restore terminal
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        terminal.show_cursor()?;
+
+        Ok(selected_account_id)
+    }
+    
+    fn update_filter(&mut self) {
+        self.filtered_indices.clear();
+        let query_lower = self.search_query.to_lowercase();
+        
+        for (idx, user) in self.users.iter().enumerate() {
+            if user.display_name.to_lowercase().contains(&query_lower) {
+                self.filtered_indices.push(idx);
+            }
+        }
+        
+        // Reset selection if current selection is out of bounds
+        let total_items = self.filtered_indices.len() + 1; // +1 for "Myself"
+        if self.selected_index >= total_items {
+            self.selected_index = 0;
+        }
+        
+        // Reset scroll to show selected item
+        self.scroll_offset = 0;
+        self.update_scroll_offset(self.viewport_height);
+    }
+    
+    fn update_scroll_offset(&mut self, viewport_height: usize) {
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + viewport_height {
+            self.scroll_offset = self.selected_index.saturating_sub(viewport_height - 1);
+        }
+    }
+
+    fn draw(&mut self, f: &mut Frame) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([
+                Constraint::Length(if self.search_mode { 5 } else { 3 }),    // Header (bigger in search mode)
+                Constraint::Min(0),       // User list
+                Constraint::Length(2),    // Help text
+            ])
+            .split(f.area());
+
+        self.render_header(f, chunks[0]);
+        self.render_user_list(f, chunks[1]);
+        self.render_help(f, chunks[2]);
+    }
+
+    fn render_header(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Select Assignee ")
+            .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        if self.search_mode {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+                
+            let header_text = vec![
+                Line::from(vec![
+                    Span::styled("Search for users", Style::default().fg(Color::Cyan)),
+                ]),
+            ];
+            let paragraph = Paragraph::new(header_text);
+            f.render_widget(paragraph, chunks[0]);
+            
+            let search_text = vec![
+                Line::from(vec![
+                    Span::styled("Filter: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(&self.search_query),
+                    Span::styled("_", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+                ]),
+            ];
+            let search_para = Paragraph::new(search_text);
+            f.render_widget(search_para, chunks[1]);
+            
+            let found_count = self.filtered_indices.len();
+            let count_text = vec![
+                Line::from(vec![
+                    Span::styled(format!("{} user(s) found", found_count), Style::default().fg(Color::DarkGray)),
+                ]),
+            ];
+            let count_para = Paragraph::new(count_text);
+            f.render_widget(count_para, chunks[2]);
+        } else {
+            let header_text = vec![
+                Line::from(vec![
+                    Span::styled("Select a user to assign the issue to", Style::default().fg(Color::Cyan)),
+                ]),
+            ];
+            let paragraph = Paragraph::new(header_text);
+            f.render_widget(paragraph, inner);
+        }
+    }
+
+    fn render_user_list(&mut self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Users ")
+            .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let viewport_height = inner.height as usize;
+        self.viewport_height = viewport_height; // Store for use in key handlers
+        let mut items: Vec<ListItem> = Vec::new();
+        
+        // Calculate total items and adjust scroll
+        let total_items = self.filtered_indices.len() + 2; // +2 for "Myself" and "None"
+        
+        // Use the persisted scroll_offset
+        let scroll_offset = self.scroll_offset;
+        
+        // Show scroll indicators
+        if scroll_offset > 0 {
+            items.push(ListItem::new("↑ more above ↑").style(Style::default().fg(Color::DarkGray)));
+        }
+        
+        let start_idx = if scroll_offset > 0 { scroll_offset + 1 } else { scroll_offset };
+        let end_idx = (start_idx + viewport_height.saturating_sub(if scroll_offset > 0 { 2 } else { 1 }))
+            .min(total_items);
+        
+        // Add visible items
+        for visible_idx in start_idx..end_idx {
+            if visible_idx == 0 {
+                // "Myself" option
+                let myself_style = if self.selected_index == 0 {
+                    Style::default().bg(Color::DarkGray).fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                };
+                items.push(ListItem::new("→ Myself").style(myself_style));
+            } else if visible_idx == 1 {
+                // "None" option (unassign)
+                let none_style = if self.selected_index == 1 {
+                    Style::default().bg(Color::DarkGray).fg(Color::Red)
+                } else {
+                    Style::default().fg(Color::Red)
+                };
+                items.push(ListItem::new("→ None (unassign)").style(none_style));
+            } else if let Some(&user_idx) = self.filtered_indices.get(visible_idx - 2) {
+                if let Some(user) = self.users.get(user_idx) {
+                    let style = if visible_idx == self.selected_index {
+                        Style::default().bg(Color::DarkGray)
+                    } else {
+                        Style::default()
+                    };
+                    
+                    let display_text = if user.account_id == self.current_user_id {
+                        format!("{} (you)", user.display_name)
+                    } else {
+                        user.display_name.clone()
+                    };
+                    
+                    items.push(ListItem::new(display_text).style(style));
+                }
+            }
+        }
+        
+        // Show scroll indicator at bottom
+        if end_idx < total_items {
+            items.push(ListItem::new("↓ more below ↓").style(Style::default().fg(Color::DarkGray)));
+        }
+
+        let list = List::new(items)
+            .block(Block::default());
+
+        f.render_widget(list, inner);
+    }
+
+    fn render_help(&self, f: &mut Frame, area: Rect) {
+        let help_text = if self.search_mode {
+            "Type to filter | Enter: Confirm | ESC: Cancel search"
+        } else {
+            "↑/↓: Navigate | /: Search | Enter: Select | q/ESC: Cancel"
+        };
+        
+        let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
         f.render_widget(help, area);
