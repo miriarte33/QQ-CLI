@@ -20,6 +20,8 @@ pub struct IssueFields {
     pub description: Option<serde_json::Value>,
     pub status: Status,
     pub assignee: Option<User>,
+    #[serde(default)]
+    pub parent: Option<Box<JiraIssue>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -128,6 +130,61 @@ impl JiraClient {
         
         let issue: JiraIssue = serde_json::from_str(&response_text)
             .context(format!("Failed to parse JIRA response. Response: {}", response_text))?;
+        
+        Ok(issue)
+    }
+    
+    pub fn get_issue_with_parent(&self, issue_key: &str) -> Result<JiraIssue> {
+        // Request the issue with parent field expanded
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, issue_key);
+        
+        let response = self.client
+            .get(&url)
+            .header(AUTHORIZATION, &self.auth_header)
+            .header(ACCEPT, "application/json")
+            .query(&[("expand", "parent")])
+            .send()
+            .context("Failed to send request to JIRA")?;
+        
+        let status = response.status();
+        let response_text = response.text()?;
+        
+        if !status.is_success() {
+            eprintln!("JIRA API error response: {}", response_text);
+            anyhow::bail!("JIRA API error: {}", status);
+        }
+        
+        let mut issue: JiraIssue = serde_json::from_str(&response_text)
+            .context(format!("Failed to parse JIRA response. Response: {}", response_text))?;
+        
+        // Early return if parent already exists
+        if issue.fields.parent.is_some() {
+            return Ok(issue);
+        }
+        
+        // Try to get parent from Epic Link custom field
+        let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&response_text) else {
+            return Ok(issue);
+        };
+        
+        let Some(fields) = json_value.get("fields").and_then(|f| f.as_object()) else {
+            return Ok(issue);
+        };
+        
+        for (key, value) in fields.iter() {
+            if !key.starts_with("customfield_") {
+                continue;
+            }
+            
+            let Some(epic_key) = value.as_str() else {
+                continue;
+            };
+            
+            if let Ok(epic) = self.get_issue(epic_key) {
+                issue.fields.parent = Some(Box::new(epic));
+                break;
+            }
+        }
         
         Ok(issue)
     }
@@ -319,5 +376,102 @@ impl JiraClient {
         self.transition_to_in_progress(issue_key)?;
         
         Ok(())
+    }
+    
+    pub fn get_epic_children(&self, epic_key: &str) -> Result<Vec<JiraIssue>> {
+        // Try modern approach first (parent field)
+        let modern_jql = format!("parent={}", epic_key);
+        let url = format!("{}/rest/api/3/search", self.base_url);
+        
+        let response = self.client
+            .get(&url)
+            .header(AUTHORIZATION, &self.auth_header)
+            .header(ACCEPT, "application/json")
+            .query(&[("jql", &modern_jql)])
+            .send()
+            .context("Failed to send search request to JIRA")?;
+        
+        let status = response.status();
+        let response_text = response.text()?;
+        
+        if status.is_success() {
+            #[derive(Debug, Deserialize)]
+            struct SearchResponse {
+                issues: Vec<JiraIssue>,
+            }
+            
+            let search_response: SearchResponse = serde_json::from_str(&response_text)
+                .context("Failed to parse JIRA search response")?;
+            
+            // If we got results with modern approach, return them
+            if !search_response.issues.is_empty() {
+                return Ok(search_response.issues);
+            }
+        }
+        
+        // Fallback to legacy Epic Link approach
+        let legacy_jql = format!("\"Epic Link\"={}", epic_key);
+        
+        let response = self.client
+            .get(&url)
+            .header(AUTHORIZATION, &self.auth_header)
+            .header(ACCEPT, "application/json")
+            .query(&[("jql", &legacy_jql)])
+            .send()
+            .context("Failed to send search request to JIRA")?;
+        
+        let status = response.status();
+        let response_text = response.text()?;
+        
+        if !status.is_success() {
+            eprintln!("JIRA API error response: {}", response_text);
+            anyhow::bail!("JIRA API error: {}", status);
+        }
+        
+        #[derive(Debug, Deserialize)]
+        struct SearchResponse {
+            issues: Vec<JiraIssue>,
+        }
+        
+        let search_response: SearchResponse = serde_json::from_str(&response_text)
+            .context("Failed to parse JIRA search response")?;
+        
+        Ok(search_response.issues)
+    }
+    
+    pub fn get_my_issues(&self) -> Result<Vec<JiraIssue>> {
+        // Use JQL to find all issues assigned to current user, excluding Done status
+        let jql = "assignee = currentUser() AND status != Done ORDER BY updated DESC";
+        let url = format!("{}/rest/api/3/search", self.base_url);
+        
+        let response = self.client
+            .get(&url)
+            .header(AUTHORIZATION, &self.auth_header)
+            .header(ACCEPT, "application/json")
+            .query(&[
+                ("jql", jql),
+                ("expand", "parent"),
+                ("fields", "key,summary,status,assignee,description,parent")
+            ])
+            .send()
+            .context("Failed to send search request to JIRA")?;
+        
+        let status = response.status();
+        let response_text = response.text()?;
+        
+        if !status.is_success() {
+            eprintln!("JIRA API error response: {}", response_text);
+            anyhow::bail!("JIRA API error: {}", status);
+        }
+        
+        #[derive(Debug, Deserialize)]
+        struct SearchResponse {
+            issues: Vec<JiraIssue>,
+        }
+        
+        let search_response: SearchResponse = serde_json::from_str(&response_text)
+            .context("Failed to parse JIRA search response")?;
+        
+        Ok(search_response.issues)
     }
 }

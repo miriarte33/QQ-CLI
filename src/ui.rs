@@ -15,7 +15,7 @@ use crossterm::{
 use std::io;
 use serde_json::Value;
 
-use crate::jira::JiraIssue;
+use crate::jira::{JiraIssue, JiraClient};
 
 pub struct JiraIssueDisplay {
     scroll_offset: u16,
@@ -323,5 +323,633 @@ impl JiraIssueDisplay {
         } else {
             None
         }
+    }
+}
+
+pub struct EpicListDisplay {
+    selected_index: usize,
+    children: Vec<JiraIssue>,
+}
+
+impl EpicListDisplay {
+    pub fn show(epic: &JiraIssue, children: Vec<JiraIssue>, client: &JiraClient) -> Result<()> {
+        // Setup terminal
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        let mut app = Self {
+            selected_index: 0,
+            children,
+        };
+        
+        let mut should_quit = false;
+        let mut message: Option<String> = None;
+
+        // Main loop
+        while !should_quit {
+            terminal.draw(|f| app.draw(f, epic, &message))?;
+
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => should_quit = true,
+                    KeyCode::Up => {
+                        if app.selected_index > 0 {
+                            app.selected_index -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if app.selected_index < app.children.len().saturating_sub(1) {
+                            app.selected_index += 1;
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        if let Some(issue) = app.children.get(app.selected_index) {
+                            message = Some(format!("Assigning {} to yourself...", issue.key));
+                            terminal.draw(|f| app.draw(f, epic, &message))?;
+                            
+                            match client.assign_issue(&issue.key) {
+                                Ok(_) => {
+                                    message = Some(format!("✓ {} assigned to you", issue.key));
+                                    // Refresh the issue data
+                                    if let Ok(updated_issue) = client.get_issue(&issue.key) {
+                                        app.children[app.selected_index] = updated_issue;
+                                    }
+                                }
+                                Err(e) => {
+                                    message = Some(format!("✗ Failed to assign {}: {}", issue.key, e));
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(issue) = app.children.get(app.selected_index) {
+                            message = Some(format!("Picking up {}...", issue.key));
+                            terminal.draw(|f| app.draw(f, epic, &message))?;
+                            
+                            match client.pickup_issue(&issue.key) {
+                                Ok(_) => {
+                                    message = Some(format!("✓ {} assigned and moved to In Progress", issue.key));
+                                    // Refresh the issue data
+                                    if let Ok(updated_issue) = client.get_issue(&issue.key) {
+                                        app.children[app.selected_index] = updated_issue;
+                                    }
+                                }
+                                Err(e) => {
+                                    message = Some(format!("✗ Failed to pickup {}: {}", issue.key, e));
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(issue) = app.children.get(app.selected_index) {
+                            message = Some(format!("Starting {}...", issue.key));
+                            terminal.draw(|f| app.draw(f, epic, &message))?;
+                            
+                            // Create feature branch
+                            use git2::Repository;
+                            match Repository::open(".") {
+                                Ok(repo) => {
+                                    let branch_name = format!("feature/{}", issue.key);
+                                    
+                                    // Get the current HEAD commit
+                                    match repo.head()
+                                        .and_then(|head| head.target().ok_or_else(|| git2::Error::from_str("No HEAD target")))
+                                        .and_then(|target| repo.find_commit(target))
+                                    {
+                                        Ok(commit) => {
+                                            // Create and checkout the new branch
+                                            match repo.branch(&branch_name, &commit, false) {
+                                                Ok(_) => {
+                                                    if let Ok(obj) = repo.revparse_single(&format!("refs/heads/{}", branch_name)) {
+                                                        let _ = repo.checkout_tree(&obj, None);
+                                                        let _ = repo.set_head(&format!("refs/heads/{}", branch_name));
+                                                        
+                                                        // Now pickup the issue
+                                                        match client.pickup_issue(&issue.key) {
+                                                            Ok(_) => {
+                                                                message = Some(format!("✓ Created branch '{}' and picked up {}", branch_name, issue.key));
+                                                                should_quit = true; // Exit after successful start
+                                                            }
+                                                            Err(e) => {
+                                                                message = Some(format!("✗ Branch created but failed to pickup: {}", e));
+                                                            }
+                                                        }
+                                                    } else {
+                                                        message = Some(format!("✗ Failed to checkout branch '{}'", branch_name));
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    message = Some(format!("✗ Failed to create branch: {}", e));
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            message = Some(format!("✗ Failed to get HEAD commit: {}", e));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    message = Some(format!("✗ Failed to open git repository: {}", e));
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('v') => {
+                        if let Some(issue) = app.children.get(app.selected_index) {
+                            // Temporarily restore terminal for nested UI
+                            disable_raw_mode()?;
+                            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                            terminal.show_cursor()?;
+                            
+                            // Show the issue details
+                            println!("Viewing issue: {}", issue.key);
+                            let _ = JiraIssueDisplay::show(issue);
+                            
+                            // Re-setup terminal for epic list
+                            enable_raw_mode()?;
+                            let mut stdout = io::stdout();
+                            execute!(stdout, EnterAlternateScreen)?;
+                            let backend = CrosstermBackend::new(stdout);
+                            terminal = Terminal::new(backend)?;
+                            
+                            message = Some(format!("Returned from viewing {}", issue.key));
+                        }
+                    }
+                    KeyCode::Char('c') => {
+                        if let Some(issue) = app.children.get(app.selected_index) {
+                            message = Some(format!("Closing {}...", issue.key));
+                            terminal.draw(|f| app.draw(f, epic, &message))?;
+                            
+                            match client.close_issue(&issue.key) {
+                                Ok(_) => {
+                                    message = Some(format!("✓ {} closed successfully", issue.key));
+                                    // Refresh the issue data
+                                    if let Ok(updated_issue) = client.get_issue(&issue.key) {
+                                        app.children[app.selected_index] = updated_issue;
+                                    }
+                                }
+                                Err(e) => {
+                                    message = Some(format!("✗ Failed to close {}: {}", issue.key, e));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Restore terminal
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        terminal.show_cursor()?;
+
+        Ok(())
+    }
+
+    fn draw(&self, f: &mut Frame, epic: &JiraIssue, message: &Option<String>) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([
+                Constraint::Length(5),    // Epic header
+                Constraint::Min(0),       // Children table
+                Constraint::Length(2),    // Message area
+                Constraint::Length(2),    // Help text
+            ])
+            .split(f.area());
+
+        self.render_epic_header(f, chunks[0], epic);
+        self.render_children_table(f, chunks[1]);
+        self.render_message(f, chunks[2], message);
+        self.render_help(f, chunks[3]);
+    }
+
+    fn render_epic_header(&self, f: &mut Frame, area: Rect, epic: &JiraIssue) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Epic Details ")
+            .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let header_text = vec![
+            Line::from(vec![
+                Span::styled("Epic: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(&epic.key),
+                Span::raw(" - "),
+                Span::raw(&epic.fields.summary),
+            ]),
+            Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(&epic.fields.status.name),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(header_text);
+        f.render_widget(paragraph, inner);
+    }
+
+    fn render_children_table(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Child Issues ({}) ", self.children.len()))
+            .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        if self.children.is_empty() {
+            let text = Paragraph::new("(No child issues in this epic)")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center);
+            f.render_widget(text, inner);
+            return;
+        }
+
+        // Create table headers
+        let header_cells: Vec<Cell> = vec!["Key", "Status", "Summary", "Assignee"]
+            .iter()
+            .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+            .collect();
+        let header = Row::new(header_cells).height(1);
+
+        // Create table rows
+        let rows: Vec<Row> = self.children.iter().enumerate().map(|(idx, issue)| {
+            let assignee = issue.fields.assignee.as_ref()
+                .map(|u| u.display_name.clone())
+                .unwrap_or_else(|| "Unassigned".to_string());
+            
+            let style = if idx == self.selected_index {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            
+            // Color code the status
+            let status_style = match issue.fields.status.name.to_lowercase().as_str() {
+                s if s.contains("done") || s.contains("closed") => Style::default().fg(Color::Green),
+                s if s.contains("progress") => Style::default().fg(Color::Yellow),
+                s if s.contains("review") => Style::default().fg(Color::Magenta),
+                _ => Style::default().fg(Color::White),
+            };
+            
+            let cells = vec![
+                Cell::from(issue.key.clone()).style(style),
+                Cell::from(issue.fields.status.name.clone()).style(style.patch(status_style)),
+                Cell::from(issue.fields.summary.clone()).style(style),
+                Cell::from(assignee).style(style),
+            ];
+            
+            Row::new(cells).height(1)
+        }).collect();
+
+        let table = Table::new(
+            rows,
+            vec![
+                Constraint::Length(12),     // Key
+                Constraint::Length(15),     // Status
+                Constraint::Min(20),        // Summary (takes remaining space)
+                Constraint::Length(20),     // Assignee
+            ]
+        )
+        .header(header)
+        .block(Block::default());
+
+        f.render_widget(table, inner);
+    }
+
+    fn render_message(&self, f: &mut Frame, area: Rect, message: &Option<String>) {
+        if let Some(msg) = message {
+            let style = if msg.starts_with('✓') {
+                Style::default().fg(Color::Green)
+            } else if msg.starts_with('✗') {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            
+            let text = Paragraph::new(msg.as_str())
+                .style(style)
+                .alignment(Alignment::Center);
+            f.render_widget(text, area);
+        }
+    }
+
+    fn render_help(&self, f: &mut Frame, area: Rect) {
+        let help = Paragraph::new("↑/↓: Navigate | v: View | a: Assign | p: Pickup | c: Close | s: Start | q/ESC: Quit")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(help, area);
+    }
+}
+
+pub struct MyIssuesDisplay {
+    selected_index: usize,
+    issues: Vec<JiraIssue>,
+}
+
+impl MyIssuesDisplay {
+    pub fn show(issues: Vec<JiraIssue>, client: &JiraClient) -> Result<()> {
+        // Setup terminal
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        let mut app = Self {
+            selected_index: 0,
+            issues,
+        };
+        
+        let mut should_quit = false;
+        let mut message: Option<String> = None;
+
+        // Main loop
+        while !should_quit {
+            terminal.draw(|f| app.draw(f, &message))?;
+
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => should_quit = true,
+                    KeyCode::Up => {
+                        if app.selected_index > 0 {
+                            app.selected_index -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if app.selected_index < app.issues.len().saturating_sub(1) {
+                            app.selected_index += 1;
+                        }
+                    }
+                    KeyCode::Char('v') => {
+                        if let Some(issue) = app.issues.get(app.selected_index) {
+                            // Temporarily restore terminal for nested UI
+                            disable_raw_mode()?;
+                            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                            terminal.show_cursor()?;
+                            
+                            // Show the issue details
+                            println!("Viewing issue: {}", issue.key);
+                            let _ = JiraIssueDisplay::show(issue);
+                            
+                            // Re-setup terminal
+                            enable_raw_mode()?;
+                            let mut stdout = io::stdout();
+                            execute!(stdout, EnterAlternateScreen)?;
+                            let backend = CrosstermBackend::new(stdout);
+                            terminal = Terminal::new(backend)?;
+                            
+                            message = Some(format!("Returned from viewing {}", issue.key));
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(issue) = app.issues.get(app.selected_index) {
+                            message = Some(format!("Moving {} to In Progress...", issue.key));
+                            terminal.draw(|f| app.draw(f, &message))?;
+                            
+                            match client.transition_to_in_progress(&issue.key) {
+                                Ok(_) => {
+                                    message = Some(format!("✓ {} moved to In Progress", issue.key));
+                                    // Refresh the issue data
+                                    if let Ok(updated_issue) = client.get_issue(&issue.key) {
+                                        app.issues[app.selected_index] = updated_issue;
+                                    }
+                                }
+                                Err(e) => {
+                                    message = Some(format!("✗ Failed to move {}: {}", issue.key, e));
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(issue) = app.issues.get(app.selected_index) {
+                            message = Some(format!("Starting {}...", issue.key));
+                            terminal.draw(|f| app.draw(f, &message))?;
+                            
+                            // Create feature branch
+                            use git2::Repository;
+                            match Repository::open(".") {
+                                Ok(repo) => {
+                                    let branch_name = format!("feature/{}", issue.key);
+                                    
+                                    // Get the current HEAD commit
+                                    match repo.head()
+                                        .and_then(|head| head.target().ok_or_else(|| git2::Error::from_str("No HEAD target")))
+                                        .and_then(|target| repo.find_commit(target))
+                                    {
+                                        Ok(commit) => {
+                                            // Create and checkout the new branch
+                                            match repo.branch(&branch_name, &commit, false) {
+                                                Ok(_) => {
+                                                    if let Ok(obj) = repo.revparse_single(&format!("refs/heads/{}", branch_name)) {
+                                                        let _ = repo.checkout_tree(&obj, None);
+                                                        let _ = repo.set_head(&format!("refs/heads/{}", branch_name));
+                                                        
+                                                        // Now pickup the issue
+                                                        match client.pickup_issue(&issue.key) {
+                                                            Ok(_) => {
+                                                                message = Some(format!("✓ Created branch '{}' and picked up {}", branch_name, issue.key));
+                                                                should_quit = true; // Exit after successful start
+                                                            }
+                                                            Err(e) => {
+                                                                message = Some(format!("✗ Branch created but failed to pickup: {}", e));
+                                                            }
+                                                        }
+                                                    } else {
+                                                        message = Some(format!("✗ Failed to checkout branch '{}'", branch_name));
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    message = Some(format!("✗ Failed to create branch: {}", e));
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            message = Some(format!("✗ Failed to get HEAD commit: {}", e));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    message = Some(format!("✗ Failed to open git repository: {}", e));
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('e') => {
+                        if let Some(issue) = app.issues.get(app.selected_index) {
+                            if let Some(parent) = &issue.fields.parent {
+                                // Temporarily restore terminal
+                                disable_raw_mode()?;
+                                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                                terminal.show_cursor()?;
+                                
+                                // Show the parent epic
+                                println!("Fetching epic details for: {}", parent.key);
+                                if let Ok(children) = client.get_epic_children(&parent.key) {
+                                    println!("Fetching child issues...");
+                                    let _ = EpicListDisplay::show(parent, children, client);
+                                }
+                                
+                                // Re-setup terminal
+                                enable_raw_mode()?;
+                                let mut stdout = io::stdout();
+                                execute!(stdout, EnterAlternateScreen)?;
+                                let backend = CrosstermBackend::new(stdout);
+                                terminal = Terminal::new(backend)?;
+                                
+                                message = Some(format!("Returned from viewing epic {}", parent.key));
+                            } else {
+                                message = Some("This issue is not part of an epic".to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Restore terminal
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        terminal.show_cursor()?;
+
+        Ok(())
+    }
+
+    fn draw(&self, f: &mut Frame, message: &Option<String>) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([
+                Constraint::Length(3),    // Header
+                Constraint::Min(0),       // Issues table
+                Constraint::Length(2),    // Message area
+                Constraint::Length(2),    // Help text
+            ])
+            .split(f.area());
+
+        self.render_header(f, chunks[0]);
+        self.render_issues_table(f, chunks[1]);
+        self.render_message(f, chunks[2], message);
+        self.render_help(f, chunks[3]);
+    }
+
+    fn render_header(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" My Issues ")
+            .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let header_text = vec![
+            Line::from(vec![
+                Span::styled("Total Issues: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(self.issues.len().to_string()),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(header_text);
+        f.render_widget(paragraph, inner);
+    }
+
+    fn render_issues_table(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Issues ")
+            .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        if self.issues.is_empty() {
+            let text = Paragraph::new("(No issues assigned to you)")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center);
+            f.render_widget(text, inner);
+            return;
+        }
+
+        // Create table headers
+        let header_cells: Vec<Cell> = vec!["Key", "Parent", "Status", "Summary"]
+            .iter()
+            .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+            .collect();
+        let header = Row::new(header_cells).height(1);
+
+        // Create table rows
+        let rows: Vec<Row> = self.issues.iter().enumerate().map(|(idx, issue)| {
+            let parent = issue.fields.parent.as_ref()
+                .map(|p| p.key.clone())
+                .unwrap_or_else(|| "—".to_string());
+            
+            let style = if idx == self.selected_index {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            
+            // Color code the status
+            let status_style = match issue.fields.status.name.to_lowercase().as_str() {
+                s if s.contains("done") || s.contains("closed") => Style::default().fg(Color::Green),
+                s if s.contains("progress") => Style::default().fg(Color::Yellow),
+                s if s.contains("review") => Style::default().fg(Color::Magenta),
+                _ => Style::default().fg(Color::White),
+            };
+            
+            let cells = vec![
+                Cell::from(issue.key.clone()).style(style),
+                Cell::from(parent).style(style),
+                Cell::from(issue.fields.status.name.clone()).style(style.patch(status_style)),
+                Cell::from(issue.fields.summary.clone()).style(style),
+            ];
+            
+            Row::new(cells).height(1)
+        }).collect();
+
+        let table = Table::new(
+            rows,
+            vec![
+                Constraint::Length(12),     // Key
+                Constraint::Length(12),     // Parent
+                Constraint::Length(15),     // Status
+                Constraint::Min(20),        // Summary (takes remaining space)
+            ]
+        )
+        .header(header)
+        .block(Block::default());
+
+        f.render_widget(table, inner);
+    }
+
+    fn render_message(&self, f: &mut Frame, area: Rect, message: &Option<String>) {
+        if let Some(msg) = message {
+            let style = if msg.starts_with('✓') {
+                Style::default().fg(Color::Green)
+            } else if msg.starts_with('✗') {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            
+            let text = Paragraph::new(msg.as_str())
+                .style(style)
+                .alignment(Alignment::Center);
+            f.render_widget(text, area);
+        }
+    }
+
+    fn render_help(&self, f: &mut Frame, area: Rect) {
+        let help = Paragraph::new("↑/↓: Navigate | v: View | e: Epic | p: In Progress | s: Start | q/ESC: Quit")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(help, area);
     }
 }

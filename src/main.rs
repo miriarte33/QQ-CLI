@@ -32,9 +32,21 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum GetSubcommands {
+    #[command(about = "Show ticket details (default)")]
+    Info,
+    
+    #[command(about = "Show parent epic of the ticket")]
+    Parent,
+}
+
+#[derive(Subcommand)]
 enum JiraCommands {
-    #[command(about = "Get ticket description from current git branch")]
-    Get,
+    #[command(about = "Get ticket information from current git branch")]
+    Get {
+        #[command(subcommand)]
+        subcommand: Option<GetSubcommands>,
+    },
     
     #[command(about = "Add a comment to the ticket from current git branch")]
     Comment {
@@ -56,6 +68,15 @@ enum JiraCommands {
         #[arg(help = "JIRA ticket number (e.g., PROJ-123)")]
         ticket: String,
     },
+    
+    #[command(about = "List all tickets in an epic with interactive controls")]
+    Epic {
+        #[arg(help = "Epic ticket number (e.g., EPIC-123)")]
+        ticket: String,
+    },
+    
+    #[command(about = "List all tickets assigned to me")]
+    Mine,
 }
 
 #[derive(Subcommand)]
@@ -140,15 +161,37 @@ fn handle_jira_command(command: JiraCommands) -> Result<()> {
     let client = JiraClient::new(config);
     
     match command {
-        JiraCommands::Get => {
+        JiraCommands::Get { subcommand } => {
             let branch = get_current_branch()?;
             let ticket_id = extract_ticket_id(&branch)?;
             
-            println!("Fetching details for ticket: {}", ticket_id);
-            let issue = client.get_issue(&ticket_id)?;
-            
-            // Use the new Ratatui UI to display the issue
-            JiraIssueDisplay::show(&issue)?;
+            match subcommand.as_ref().unwrap_or(&GetSubcommands::Info) {
+                GetSubcommands::Info => {
+                    println!("Fetching details for ticket: {}", ticket_id);
+                    let issue = client.get_issue(&ticket_id)?;
+                    
+                    // Use the new Ratatui UI to display the issue
+                    JiraIssueDisplay::show(&issue)?;
+                }
+                GetSubcommands::Parent => {
+                    use ui::EpicListDisplay;
+                    
+                    println!("Fetching parent epic for ticket: {}", ticket_id);
+                    let issue = client.get_issue_with_parent(&ticket_id)?;
+                    
+                    if let Some(parent) = &issue.fields.parent {
+                        println!("Found parent epic: {}", parent.key);
+                        
+                        println!("Fetching child issues...");
+                        let children = client.get_epic_children(&parent.key)?;
+                        
+                        // Display the epic and its children in interactive UI
+                        EpicListDisplay::show(parent, children, &client)?;
+                    } else {
+                        println!("This issue is not part of an epic.");
+                    }
+                }
+            }
         }
         
         JiraCommands::Comment { message } => {
@@ -219,6 +262,34 @@ fn handle_jira_command(command: JiraCommands) -> Result<()> {
             println!("Picking up ticket: {}", ticket);
             client.pickup_issue(&ticket)?;
             println!("Ticket assigned to you and moved to In Progress!");
+        }
+        
+        JiraCommands::Epic { ticket } => {
+            use ui::EpicListDisplay;
+            
+            println!("Fetching epic details for: {}", ticket);
+            let epic = client.get_issue(&ticket)?;
+            
+            println!("Fetching child issues...");
+            let children = client.get_epic_children(&ticket)?;
+            
+            // Display the epic and its children in interactive UI
+            EpicListDisplay::show(&epic, children, &client)?;
+        }
+        
+        JiraCommands::Mine => {
+            use ui::MyIssuesDisplay;
+            
+            println!("Fetching issues assigned to you...");
+            let issues = client.get_my_issues()?;
+            
+            if issues.is_empty() {
+                println!("No issues currently assigned to you.");
+            } else {
+                println!("Found {} issue(s) assigned to you.", issues.len());
+                // Display the issues in interactive UI
+                MyIssuesDisplay::show(issues, &client)?;
+            }
         }
     }
     
