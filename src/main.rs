@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 mod config;
 mod jira;
 mod ui;
+mod google;
 
 use config::Config;
 
@@ -22,6 +23,12 @@ enum Commands {
     Jira {
         #[command(subcommand)]
         command: JiraCommands,
+    },
+    
+    #[command(about = "Google Calendar meetings commands")]
+    Meetings {
+        #[command(subcommand)]
+        command: MeetingsCommands,
     },
     
     #[command(about = "Configure qq settings")]
@@ -74,6 +81,12 @@ enum JiraCommands {
 }
 
 #[derive(Subcommand)]
+enum MeetingsCommands {
+    #[command(about = "List today's meetings from Google Calendar")]
+    List,
+}
+
+#[derive(Subcommand)]
 enum ConfigCommands {
     #[command(about = "Configure JIRA settings")]
     Jira {
@@ -86,6 +99,15 @@ enum ConfigCommands {
         #[arg(long, help = "JIRA API token")]
         token: String,
     },
+    
+    #[command(about = "Configure Google Calendar settings")]
+    Google {
+        #[arg(long, help = "Google OAuth2 Client ID")]
+        client_id: String,
+        
+        #[arg(long, help = "Google OAuth2 Client Secret")]
+        client_secret: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -94,6 +116,10 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Jira { command } => {
             handle_jira_command(command)?;
+        }
+        
+        Commands::Meetings { command } => {
+            handle_meetings_command(command)?;
         }
         
         Commands::Config { command } => {
@@ -110,6 +136,45 @@ fn handle_config_command(command: ConfigCommands) -> Result<()> {
             let config = Config::new(url, username, token);
             config.save()?;
             println!("JIRA configuration saved successfully!");
+        }
+        ConfigCommands::Google { client_id, client_secret } => {
+            let mut config = Config::load().unwrap_or_else(|_| Config::new(
+                String::new(),
+                String::new(),
+                String::new(),
+            ));
+            config.set_google_credentials(client_id, client_secret);
+            config.save()?;
+            println!("Google Calendar configuration saved successfully!");
+        }
+    }
+    
+    Ok(())
+}
+
+fn handle_meetings_command(command: MeetingsCommands) -> Result<()> {
+    use ui::MeetingsListDisplay;
+    
+    match command {
+        MeetingsCommands::List => {
+            let config = Config::load()?;
+            
+            let client_id = config.google_client_id
+                .context("Google client ID not configured. Run 'qq config google' first.")?;
+            let client_secret = config.google_client_secret
+                .context("Google client secret not configured. Run 'qq config google' first.")?;
+            
+            let token_path = Config::google_token_path()?;
+            
+            println!("Fetching meetings from Google Calendar...");
+            let meetings = google::blocking_list_meetings(client_id, client_secret, token_path)?;
+            
+            if meetings.is_empty() {
+                println!("No meetings scheduled for the next 7 days.");
+            } else {
+                println!("Found {} meeting(s).", meetings.len());
+                MeetingsListDisplay::show(meetings)?;
+            }
         }
     }
     

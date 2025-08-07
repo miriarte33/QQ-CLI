@@ -9,6 +9,8 @@ pub struct Config {
     pub jira_url: String,
     pub username: String,
     pub api_token: String,
+    pub google_client_id: Option<String>,
+    pub google_client_secret: Option<String>,
 }
 
 impl Config {
@@ -17,7 +19,14 @@ impl Config {
             jira_url,
             username,
             api_token,
+            google_client_id: None,
+            google_client_secret: None,
         }
+    }
+    
+    pub fn set_google_credentials(&mut self, client_id: String, client_secret: String) {
+        self.google_client_id = Some(client_id);
+        self.google_client_secret = Some(client_secret);
     }
     
     pub fn save(&self) -> Result<()> {
@@ -45,5 +54,11 @@ impl Config {
         let home_dir = dirs::config_dir()
             .context("Failed to determine config directory")?;
         Ok(home_dir.join("qq").join("config.toml"))
+    }
+    
+    pub fn google_token_path() -> Result<PathBuf> {
+        let home_dir = dirs::config_dir()
+            .context("Failed to determine config directory")?;
+        Ok(home_dir.join("qq").join("google_tokens.json"))
     }
 }

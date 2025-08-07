@@ -17,3 +17,13 @@ anyhow = "1.0"
 ratatui = "0.29"
 crossterm = "0.28"
 textwrap = "0.16"
+google-calendar3 = "6.0"
+yup-oauth2 = "11.0"
+webbrowser = "1.0"
+chrono = "0.4"
+chrono-tz = "0.10"
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1.0", features = ["client", "http1"] }
+hyper-rustls = { version = "0.27", features = ["ring"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

@@ -1,4 +1,6 @@
 use anyhow::Result;
+use chrono::Timelike;
+use chrono_tz::America::New_York;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -1746,6 +1748,244 @@ impl AllEpicsDisplay {
         } else {
             "↑/↓: Navigate | v: View Epic | /: Search | q/ESC: Quit"
         };
+        
+        let help = Paragraph::new(help_text)
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(help, area);
+    }
+}
+
+pub struct MeetingsListDisplay {
+    selected_index: usize,
+    meetings: Vec<crate::google::Meeting>,
+    scroll_offset: usize,
+    viewport_height: usize,
+}
+
+impl MeetingsListDisplay {
+    pub fn show(meetings: Vec<crate::google::Meeting>) -> Result<()> {
+        // Setup terminal
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        let mut app = Self {
+            selected_index: 0,
+            meetings,
+            scroll_offset: 0,
+            viewport_height: 20, // Will be updated during first render
+        };
+        
+        let mut should_quit = false;
+        let mut message: Option<String> = None;
+
+        // Main loop
+        while !should_quit {
+            terminal.draw(|f| app.draw(f, &message))?;
+
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => should_quit = true,
+                    KeyCode::Up => {
+                        if app.selected_index > 0 {
+                            app.selected_index -= 1;
+                            app.update_scroll();
+                        }
+                    }
+                    KeyCode::Down => {
+                        if app.selected_index < app.meetings.len().saturating_sub(1) {
+                            app.selected_index += 1;
+                            app.update_scroll();
+                        }
+                    }
+                    KeyCode::Char('j') => {
+                        if let Some(meeting) = app.meetings.get(app.selected_index) {
+                            let meeting_summary = meeting.summary.clone();
+                            let meeting_url = meeting.meeting_url.clone();
+                            
+                            if let Some(url) = meeting_url {
+                                message = Some(format!("Opening meeting: {}", meeting_summary));
+                                terminal.draw(|f| app.draw(f, &message))?;
+                                
+                                if let Err(e) = webbrowser::open(&url) {
+                                    message = Some(format!("Failed to open browser: {}", e));
+                                } else {
+                                    message = Some(format!("✓ Opened meeting in browser"));
+                                }
+                            } else {
+                                message = Some(format!("No meeting URL available for: {}", meeting_summary));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Restore terminal
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        terminal.show_cursor()?;
+
+        Ok(())
+    }
+
+    fn update_scroll(&mut self) {
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + self.viewport_height {
+            self.scroll_offset = self.selected_index - self.viewport_height + 1;
+        }
+    }
+
+    fn draw(&mut self, f: &mut Frame, message: &Option<String>) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([
+                Constraint::Length(3),     // Header
+                Constraint::Min(0),        // Meetings table
+                Constraint::Length(1),     // Message line
+                Constraint::Length(2),     // Help text
+            ])
+            .split(f.area());
+
+        self.render_header(f, chunks[0]);
+        self.render_meetings_table(f, chunks[1]);
+        self.render_message(f, chunks[2], message);
+        self.render_help(f, chunks[3]);
+    }
+
+    fn render_header(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Today's Meetings ")
+            .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let header_text = vec![
+            Line::from(vec![
+                Span::styled("Total Meetings: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(self.meetings.len().to_string()),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(header_text);
+        f.render_widget(paragraph, inner);
+    }
+
+    fn render_meetings_table(&mut self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL);
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        // Update viewport height
+        self.viewport_height = inner.height.saturating_sub(2) as usize;
+
+        // Create table headers
+        let header_cells = ["Day", "Time", "Meeting Name", "Status", "URL"]
+            .iter()
+            .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+        let header = Row::new(header_cells).height(1);
+
+        // Create table rows
+        let now = chrono::Utc::now().with_timezone(&New_York);
+        let rows: Vec<Row> = self.meetings
+            .iter()
+            .enumerate()
+            .skip(self.scroll_offset)
+            .take(self.viewport_height)
+            .map(|(idx, meeting)| {
+                let day_str = if meeting.start_time.date_naive() == now.date_naive() {
+                    "Today".to_string()
+                } else if meeting.start_time.date_naive() == (now + chrono::Duration::days(1)).date_naive() {
+                    "Tomorrow".to_string()
+                } else {
+                    meeting.start_time.format("%a %b %d").to_string()
+                };
+                
+                let time_str = format!(
+                    "{}:{:02} {} - {}:{:02} {}",
+                    meeting.start_time.format("%l").to_string().trim(),
+                    meeting.start_time.minute(),
+                    meeting.start_time.format("%p"),
+                    meeting.end_time.format("%l").to_string().trim(),
+                    meeting.end_time.minute(),
+                    meeting.end_time.format("%p")
+                );
+                
+                let status = if now >= meeting.start_time && now <= meeting.end_time {
+                    "In Progress"
+                } else if now < meeting.start_time {
+                    "Upcoming"
+                } else {
+                    "Ended"
+                };
+                
+                let status_color = match status {
+                    "In Progress" => Color::Green,
+                    "Upcoming" => Color::Cyan,
+                    _ => Color::DarkGray,
+                };
+                
+                let url_status = if meeting.meeting_url.is_some() {
+                    "Available"
+                } else {
+                    "Not Available"
+                };
+                
+                let cells = vec![
+                    Cell::from(day_str),
+                    Cell::from(time_str),
+                    Cell::from(meeting.summary.clone()),
+                    Cell::from(status).style(Style::default().fg(status_color)),
+                    Cell::from(url_status),
+                ];
+                
+                let style = if idx + self.scroll_offset == self.selected_index {
+                    Style::default().bg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
+                
+                Row::new(cells).style(style)
+            })
+            .collect();
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(12),  // Day
+                Constraint::Length(15),  // Time
+                Constraint::Min(30),     // Meeting Name
+                Constraint::Length(12),  // Status
+                Constraint::Length(15),  // URL
+            ],
+        )
+        .header(header)
+        .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+        f.render_widget(table, inner);
+    }
+
+    fn render_message(&self, f: &mut Frame, area: Rect, message: &Option<String>) {
+        if let Some(msg) = message {
+            let paragraph = Paragraph::new(msg.as_str())
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(Alignment::Center);
+            f.render_widget(paragraph, area);
+        }
+    }
+
+    fn render_help(&self, f: &mut Frame, area: Rect) {
+        let help_text = "↑/↓: Navigate | j: Join Meeting | q/ESC: Quit";
         
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::DarkGray))

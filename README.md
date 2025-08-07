@@ -10,6 +10,45 @@ cargo install --path .
 
 ## Features
 
+### Google Calendar Integration
+
+View and join your Google Calendar meetings directly from the terminal.
+
+#### Configuration
+
+First, configure your Google OAuth2 credentials:
+
+```bash
+qq config google --client-id <your-client-id> --client-secret <your-client-secret>
+```
+
+To get Google OAuth2 credentials:
+1. Go to https://console.cloud.google.com/
+2. Create a new project or select an existing one
+3. Enable the Google Calendar API
+4. Create OAuth 2.0 credentials (Desktop application type)
+5. Download the credentials and use the client ID and client secret
+
+#### Commands
+
+##### List meetings
+```bash
+qq meetings list    # Shows today's meetings in an interactive table
+```
+
+#### Interactive Meeting View
+
+The meetings list provides an interactive terminal UI with:
+- `↑/↓` - Navigate through meetings
+- `j` - Join the selected meeting (opens meeting URL in browser)
+- `q` or `ESC` - Quit the view
+
+The table shows:
+- Meeting time (start - end)
+- Meeting name
+- Status (Upcoming, In Progress, or Ended)
+- URL availability
+
 ### JIRA Integration
 
 Automatically extracts JIRA ticket IDs from git branch names and provides quick access to ticket operations. Includes powerful interactive views for managing epics and your assigned tickets.
