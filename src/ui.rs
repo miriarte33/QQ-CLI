@@ -904,6 +904,26 @@ impl MyIssuesDisplay {
                             }
                         }
                     }
+                    KeyCode::Char('c') => {
+                        if let Some(issue) = app.issues.get(app.selected_index) {
+                            let issue_key = issue.key.clone();
+                            message = Some(format!("Closing {}...", issue_key));
+                            terminal.draw(|f| app.draw(f, &message))?;
+                            
+                            match client.close_issue(&issue_key) {
+                                Ok(_) => {
+                                    message = Some(format!("✓ {} closed successfully", issue_key));
+                                    // Refresh the issue data
+                                    if let Ok(updated_issue) = client.get_issue(&issue_key) {
+                                        app.issues[app.selected_index] = updated_issue;
+                                    }
+                                }
+                                Err(e) => {
+                                    message = Some(format!("✗ Failed to close {}: {}", issue_key, e));
+                                }
+                            }
+                        }
+                    }
                     KeyCode::Char('e') => {
                         if let Some(issue) = app.issues.get(app.selected_index) {
                             if let Some(parent) = &issue.fields.parent {
@@ -1094,7 +1114,7 @@ impl MyIssuesDisplay {
     }
 
     fn render_help(&self, f: &mut Frame, area: Rect) {
-        let help = Paragraph::new("↑/↓: Navigate | v: View | e: Epic | p: In Progress | s: Start | q/ESC: Quit")
+        let help = Paragraph::new("↑/↓: Navigate | v: View | c: Close | e: Epic | p: In Progress | s: Start | q/ESC: Quit")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
         f.render_widget(help, area);
