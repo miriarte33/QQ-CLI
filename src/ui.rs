@@ -654,7 +654,7 @@ impl EpicListDisplay {
         }
 
         // Create table headers
-        let header_cells: Vec<Cell> = vec!["Key", "Status", "Summary", "Assignee"]
+        let header_cells: Vec<Cell> = vec!["", "Key", "Status", "Summary", "Assignee"]
             .iter()
             .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
             .collect();
@@ -677,12 +677,6 @@ impl EpicListDisplay {
                     .map(|u| u.display_name.clone())
                     .unwrap_or_else(|| "Unassigned".to_string());
                 
-                let style = if actual_idx == self.selected_index {
-                    Style::default().bg(Color::DarkGray)
-                } else {
-                    Style::default()
-                };
-                
                 // Color code the status
                 let status_style = match issue.fields.status.name.to_lowercase().as_str() {
                     s if s.contains("done") || s.contains("closed") => Style::default().fg(Color::Green),
@@ -691,11 +685,15 @@ impl EpicListDisplay {
                     _ => Style::default().fg(Color::White),
                 };
                 
+                // Selection indicator
+                let indicator = if actual_idx == self.selected_index { "➤" } else { "" };
+                
                 let cells = vec![
-                    Cell::from(issue.key.clone()).style(style),
-                    Cell::from(issue.fields.status.name.clone()).style(style.patch(status_style)),
-                    Cell::from(issue.fields.summary.clone()).style(style),
-                    Cell::from(assignee).style(style),
+                    Cell::from(indicator).style(Style::default().fg(Color::Green)),
+                    Cell::from(issue.key.clone()),
+                    Cell::from(issue.fields.status.name.clone()).style(status_style),
+                    Cell::from(issue.fields.summary.clone()),
+                    Cell::from(assignee),
                 ];
                 
                 Row::new(cells).height(1)
@@ -717,6 +715,7 @@ impl EpicListDisplay {
         let table = Table::new(
             rows,
             vec![
+                Constraint::Length(3),      // Arrow indicator
                 Constraint::Length(12),     // Key
                 Constraint::Length(15),     // Status
                 Constraint::Min(20),        // Summary (takes remaining space)
@@ -1022,7 +1021,7 @@ impl MyIssuesDisplay {
         }
 
         // Create table headers
-        let header_cells: Vec<Cell> = vec!["Key", "Parent", "Status", "Summary"]
+        let header_cells: Vec<Cell> = vec!["", "Key", "Parent", "Status", "Summary"]
             .iter()
             .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
             .collect();
@@ -1045,12 +1044,6 @@ impl MyIssuesDisplay {
                     .map(|p| p.key.clone())
                     .unwrap_or_else(|| "—".to_string());
                 
-                let style = if actual_idx == self.selected_index {
-                    Style::default().bg(Color::DarkGray)
-                } else {
-                    Style::default()
-                };
-                
                 // Color code the status
                 let status_style = match issue.fields.status.name.to_lowercase().as_str() {
                     s if s.contains("done") || s.contains("closed") => Style::default().fg(Color::Green),
@@ -1059,11 +1052,15 @@ impl MyIssuesDisplay {
                     _ => Style::default().fg(Color::White),
                 };
                 
+                // Selection indicator
+                let indicator = if actual_idx == self.selected_index { "➤" } else { "" };
+                
                 let cells = vec![
-                    Cell::from(issue.key.clone()).style(style),
-                    Cell::from(parent).style(style),
-                    Cell::from(issue.fields.status.name.clone()).style(style.patch(status_style)),
-                    Cell::from(issue.fields.summary.clone()).style(style),
+                    Cell::from(indicator).style(Style::default().fg(Color::Green)),
+                    Cell::from(issue.key.clone()),
+                    Cell::from(parent),
+                    Cell::from(issue.fields.status.name.clone()).style(status_style),
+                    Cell::from(issue.fields.summary.clone()),
                 ];
                 
                 Row::new(cells).height(1)
@@ -1084,6 +1081,7 @@ impl MyIssuesDisplay {
         let table = Table::new(
             rows,
             vec![
+                Constraint::Length(3),      // Arrow indicator
                 Constraint::Length(12),     // Key
                 Constraint::Length(12),     // Parent
                 Constraint::Length(15),     // Status
@@ -1359,35 +1357,25 @@ impl AssigneeSelector {
         for visible_idx in start_idx..end_idx {
             if visible_idx == 0 {
                 // "Myself" option
-                let myself_style = if self.selected_index == 0 {
-                    Style::default().bg(Color::DarkGray).fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                };
-                items.push(ListItem::new("→ Myself").style(myself_style));
+                let indicator = if self.selected_index == 0 { "➤ " } else { "  " };
+                let text = format!("{} Myself", indicator);
+                items.push(ListItem::new(text).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
             } else if visible_idx == 1 {
                 // "None" option (unassign)
-                let none_style = if self.selected_index == 1 {
-                    Style::default().bg(Color::DarkGray).fg(Color::Red)
-                } else {
-                    Style::default().fg(Color::Red)
-                };
-                items.push(ListItem::new("→ None (unassign)").style(none_style));
+                let indicator = if self.selected_index == 1 { "➤ " } else { "  " };
+                let text = format!("{} None (unassign)", indicator);
+                items.push(ListItem::new(text).style(Style::default().fg(Color::Red)));
             } else if let Some(&user_idx) = self.filtered_indices.get(visible_idx - 2) {
                 if let Some(user) = self.users.get(user_idx) {
-                    let style = if visible_idx == self.selected_index {
-                        Style::default().bg(Color::DarkGray)
-                    } else {
-                        Style::default()
-                    };
+                    let indicator = if visible_idx == self.selected_index { "➤ " } else { "  " };
                     
                     let display_text = if user.account_id == self.current_user_id {
-                        format!("{} (you)", user.display_name)
+                        format!("{}{} (you)", indicator, user.display_name)
                     } else {
-                        user.display_name.clone()
+                        format!("{}{}", indicator, user.display_name)
                     };
                     
-                    items.push(ListItem::new(display_text).style(style));
+                    items.push(ListItem::new(display_text));
                 }
             }
         }
@@ -1675,7 +1663,7 @@ impl AllEpicsDisplay {
         }
 
         // Create table headers
-        let header_cells: Vec<Cell> = vec!["Key", "Status", "Summary"]
+        let header_cells: Vec<Cell> = vec!["", "Key", "Status", "Summary"]
             .iter()
             .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
             .collect();
@@ -1696,12 +1684,6 @@ impl AllEpicsDisplay {
                 let epic = &self.epics[epic_idx];
                 let actual_idx = visible_start + visible_idx;
                 
-                let style = if actual_idx == self.selected_index {
-                    Style::default().bg(Color::DarkGray)
-                } else {
-                    Style::default()
-                };
-                
                 // Color code the status
                 let status_style = match epic.fields.status.name.to_lowercase().as_str() {
                     s if s.contains("done") || s.contains("closed") => Style::default().fg(Color::Green),
@@ -1710,10 +1692,14 @@ impl AllEpicsDisplay {
                     _ => Style::default().fg(Color::White),
                 };
                 
+                // Selection indicator
+                let indicator = if actual_idx == self.selected_index { "➤" } else { "" };
+                
                 let cells = vec![
-                    Cell::from(epic.key.clone()).style(style),
-                    Cell::from(epic.fields.status.name.clone()).style(style.patch(status_style)),
-                    Cell::from(epic.fields.summary.clone()).style(style),
+                    Cell::from(indicator).style(Style::default().fg(Color::Green)),
+                    Cell::from(epic.key.clone()),
+                    Cell::from(epic.fields.status.name.clone()).style(status_style),
+                    Cell::from(epic.fields.summary.clone()),
                 ];
                 
                 Row::new(cells).height(1)
@@ -1734,6 +1720,7 @@ impl AllEpicsDisplay {
         let table = Table::new(
             rows,
             vec![
+                Constraint::Length(3),      // Arrow indicator
                 Constraint::Length(12),     // Key
                 Constraint::Length(15),     // Status
                 Constraint::Min(20),        // Summary (takes remaining space)
@@ -1910,7 +1897,7 @@ impl MeetingsListDisplay {
         self.viewport_height = inner.height.saturating_sub(2) as usize;
 
         // Create table headers
-        let header_cells = ["Day", "Time", "Meeting Name", "Status", "URL"]
+        let header_cells = ["", "Day", "Time", "Meeting Name", "Status", "URL"]
             .iter()
             .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
         let header = Row::new(header_cells).height(1);
@@ -1961,7 +1948,11 @@ impl MeetingsListDisplay {
                     "Not Available"
                 };
                 
+                // Selection indicator
+                let indicator = if idx + self.scroll_offset == self.selected_index { "➤" } else { "" };
+                
                 let cells = vec![
+                    Cell::from(indicator).style(Style::default().fg(Color::Green)),
                     Cell::from(day_str),
                     Cell::from(time_str),
                     Cell::from(meeting.summary.clone()),
@@ -1969,19 +1960,14 @@ impl MeetingsListDisplay {
                     Cell::from(url_status),
                 ];
                 
-                let style = if idx + self.scroll_offset == self.selected_index {
-                    Style::default().bg(Color::DarkGray)
-                } else {
-                    Style::default()
-                };
-                
-                Row::new(cells).style(style)
+                Row::new(cells)
             })
             .collect();
 
         let table = Table::new(
             rows,
             [
+                Constraint::Length(3),   // Arrow indicator
                 Constraint::Length(12),  // Day
                 Constraint::Length(15),  // Time
                 Constraint::Min(30),     // Meeting Name
