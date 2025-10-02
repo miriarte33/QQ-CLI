@@ -358,7 +358,7 @@ impl JiraClient {
     pub fn get_epic_children(&self, epic_key: &str) -> Result<Vec<JiraIssue>> {
         // Try modern approach first (parent field)
         let modern_jql = format!("parent={}", epic_key);
-        let url = format!("{}/rest/api/3/search", self.base_url);
+        let url = format!("{}/rest/api/3/search/jql", self.base_url);
         
         let response = self.client
             .get(&url)
@@ -419,7 +419,7 @@ impl JiraClient {
     pub fn get_my_issues(&self) -> Result<Vec<JiraIssue>> {
         // Use JQL to find all issues assigned to current user, excluding Done status
         let jql = "assignee = currentUser() AND status != Done ORDER BY updated DESC";
-        let url = format!("{}/rest/api/3/search", self.base_url);
+        let url = format!("{}/rest/api/3/search/jql", self.base_url);
         
         let response = self.client
             .get(&url)
@@ -512,8 +512,8 @@ impl JiraClient {
         
         for epic_type in epic_types {
             let jql = format!("issuetype = \"{}\" AND status != Done ORDER BY updated DESC", epic_type);
-            
-            let url = format!("{}/rest/api/3/search", self.base_url);
+
+            let url = format!("{}/rest/api/3/search/jql", self.base_url);
             
             let response = self.client
                 .get(&url)
