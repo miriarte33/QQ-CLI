@@ -359,12 +359,15 @@ impl JiraClient {
         // Try modern approach first (parent field)
         let modern_jql = format!("parent={}", epic_key);
         let url = format!("{}/rest/api/3/search/jql", self.base_url);
-        
+
         let response = self.client
             .get(&url)
             .header(AUTHORIZATION, &self.auth_header)
             .header(ACCEPT, "application/json")
-            .query(&[("jql", &modern_jql)])
+            .query(&[
+                ("jql", &modern_jql),
+                ("fields", &"key,summary,status,assignee,description".to_string())
+            ])
             .send()
             .context("Failed to send search request to JIRA")?;
         
@@ -388,12 +391,15 @@ impl JiraClient {
         
         // Fallback to legacy Epic Link approach
         let legacy_jql = format!("\"Epic Link\"={}", epic_key);
-        
+
         let response = self.client
             .get(&url)
             .header(AUTHORIZATION, &self.auth_header)
             .header(ACCEPT, "application/json")
-            .query(&[("jql", &legacy_jql)])
+            .query(&[
+                ("jql", &legacy_jql),
+                ("fields", &"key,summary,status,assignee,description".to_string())
+            ])
             .send()
             .context("Failed to send search request to JIRA")?;
         
